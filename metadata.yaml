@@ -1,5 +1,5 @@
 name: tool_call_notifier # 这是你的插件的唯一识别名。
 desc: 一个在LLM调用工具函数时发送消息通知的插件。 # 插件简短描述
-version: 0.0.1 # 插件版本号。
+version: v0.0.1 # 插件版本号。
 author: slot181 # 作者
 repo: https://github.com/slot181/astrbot_plugin_tool_prompts # 请在这里填写你的插件仓库地址
