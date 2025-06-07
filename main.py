@@ -1,6 +1,7 @@
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
-from astrbot.api import logger, LLMResponse
+from astrbot.api import logger
+from astrbot.api.provider import LLMResponse
 
 
 @register("tool_call_notifier", "PluginDeveloper", "一个LLM工具调用消息提示插件", "1.0.0")
