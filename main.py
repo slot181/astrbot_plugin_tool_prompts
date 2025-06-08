@@ -7,20 +7,18 @@ from astrbot.api.provider import LLMResponse
 import astrbot.api.message_components as Comp
 
 
-@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.0.7")
+@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.0.8")
 class ToolCallNotifierPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
-        # 分别匹配URL和常见文件路径的正则表达式
-        self.url_pattern = re.compile(r'https?://[^\s"\'`<>]+')
-        # 匹配Linux和Windows的绝对路径
+        # 匹配URL (包括可能省略协议的//开头的) 和常见文件路径的正则表达式
+        self.url_pattern = re.compile(r'(?:https?:)?//[^\s"\'`<>]+') 
         self.path_pattern = re.compile(r'(?:[a-zA-Z]:\\|/)[^\s"\'`<>]+')
 
     @filter.on_llm_response(priority=1)
     async def on_llm_response_handler(self, event: AstrMessageEvent, resp: LLMResponse):
         """统一处理LLM响应，包括工具调用通知和媒体链接转换"""
         
-        # 1. 处理工具调用
         if resp.role == "tool" and resp.tools_call_name:
             logger.info("LLM响应处理器：检测到工具调用。")
             for tool_name in resp.tools_call_name:
@@ -28,15 +26,12 @@ class ToolCallNotifierPlugin(Star):
                 await event.send(event.plain_result(message))
             return
 
-        # 2. 处理媒体链接和路径
         if resp.role == "assistant" and resp.completion_text:
             text_to_process = resp.completion_text
             
-            # 查找所有URL和文件路径的匹配项
             url_matches = list(self.url_pattern.finditer(text_to_process))
             path_matches = list(self.path_pattern.finditer(text_to_process))
             
-            # 合并并排序所有匹配项
             all_matches = sorted(url_matches + path_matches, key=lambda m: m.start())
 
             if not all_matches:
@@ -44,32 +39,37 @@ class ToolCallNotifierPlugin(Star):
 
             logger.debug(f"LLM响应处理器：接收到原始文本: {text_to_process}")
 
-            # 预处理，检查是否包含有效的媒体链接
-            has_valid_media = any(self._is_media(match.group(0)) for match in all_matches)
-            
-            if not has_valid_media:
+            # 检查是否有任何一个匹配是有效的媒体
+            processed_matches = []
+            for match in all_matches:
+                path_or_url = match.group(0)
+                # 补全 // 开头的 URL
+                if path_or_url.startswith("//"):
+                    path_or_url = "https:" + path_or_url
+                
+                if self._is_media(path_or_url):
+                    processed_matches.append({'original': match, 'corrected_path': path_or_url})
+
+            if not processed_matches:
                 logger.debug("LLM响应处理器：未找到可识别的媒体，不进行特殊处理。")
                 return
 
             logger.info("LLM响应处理器：找到可识别的媒体，将分条发送并阻止原始消息。")
             
             last_end = 0
-            for match in all_matches:
-                # 发送匹配前的纯文本部分
+            for item in processed_matches:
+                match = item['original']
+                corrected_path = item['corrected_path']
+
                 plain_text_before = text_to_process[last_end:match.start()].strip()
                 if plain_text_before:
                     await event.send(event.plain_result(plain_text_before))
-
-                # 提取URL或路径
-                path_or_url = match.group(0)
                 
-                # 创建并发送媒体消息段
-                media_segment = self._create_media_segment(path_or_url)
+                media_segment = self._create_media_segment(corrected_path)
                 await event.send(event.chain_result([media_segment]))
                 
                 last_end = match.end()
 
-            # 发送最后一个匹配后的纯文本部分
             plain_text_after = text_to_process[last_end:].strip()
             if plain_text_after:
                 await event.send(event.plain_result(plain_text_after))
@@ -78,21 +78,21 @@ class ToolCallNotifierPlugin(Star):
             resp.completion_text = " "
 
     def _is_media(self, path_or_url: str) -> bool:
-        """检查一个路径或URL是否是可识别的媒体类型"""
-        # 检查文件后缀
         has_media_extension = any(path_or_url.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif', '.mp4', '.mov', '.avi', '.wav', '.pdf', '.doc', '.docx', '.txt'])
         if not has_media_extension:
             return False
         
-        # 如果是本地路径，额外检查文件是否存在
         if path_or_url.startswith('/') or re.match(r'^[a-zA-Z]:\\', path_or_url):
             return os.path.exists(path_or_url)
+        
+        # 对于URL，我们假设它是可访问的，如果它有媒体后缀
+        if path_or_url.lower().startswith('http:') or path_or_url.lower().startswith('https:'):
+            return True
             
-        return True
+        return False # 其他情况（如相对路径但非媒体后缀）不视为有效媒体
 
     def _create_media_segment(self, path_or_url: str):
-        """根据路径或URL创建对应的消息组件"""
-        is_url = path_or_url.lower().startswith('http')
+        is_url = path_or_url.lower().startswith('http:') or path_or_url.lower().startswith('https:')
         
         # 图片
         if any(path_or_url.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif']):
@@ -111,8 +111,8 @@ class ToolCallNotifierPlugin(Star):
             logger.info(f"媒体处理：识别为文档: {path_or_url}")
             return Comp.File(url=path_or_url, name=os.path.basename(path_or_url)) if is_url else Comp.File(file=path_or_url, name=os.path.basename(path_or_url))
 
-        logger.debug(f"媒体处理：路径 '{path_or_url}' 未匹配任何已知媒体类型，将作为纯文本处理。")
-        return Comp.Plain(text=path_or_url)
+        logger.debug(f"媒体处理：路径 '{path_or_url}' 未匹配任何已知媒体类型（在_create_media_segment中），将作为纯文本处理。")
+        return Comp.Plain(text=path_or_url) # Fallback
 
     async def terminate(self):
         """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
