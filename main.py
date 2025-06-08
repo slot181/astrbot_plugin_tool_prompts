@@ -7,7 +7,7 @@ from astrbot.api.provider import LLMResponse
 import astrbot.api.message_components as Comp
 
 
-@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.1.2")
+@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.1.3")
 class ToolCallNotifierPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -57,16 +57,26 @@ class ToolCallNotifierPlugin(Star):
 
             logger.debug(f"LLM响应处理器：接收到原始文本: {text_to_process}")
 
-            # 检查是否有任何一个匹配是有效的媒体
-            processed_matches = []
-            for match in all_matches:
-                path_or_url = match.group(0)
+            # 检查是否有任何一个匹配是有效的媒体，并基于 corrected_path 进行去重
+            temp_processed_items = {} # 使用 corrected_path 作为键来去重
+            for match_obj in all_matches: # all_matches 已经基于原始匹配字符串去重
+                original_match_str = match_obj.group(0)
+                corrected_path = original_match_str
                 # 补全 // 开头的 URL
-                if path_or_url.startswith("//"):
-                    path_or_url = "https:" + path_or_url
+                if original_match_str.startswith("//"):
+                    corrected_path = "https:" + original_match_str
                 
-                if self._is_media(path_or_url):
-                    processed_matches.append({'original': match, 'corrected_path': path_or_url})
+                if self._is_media(corrected_path):
+                    # 如果 corrected_path 尚未在 temp_processed_items 中，
+                    # 或者新的匹配项开始位置更早（理论上 all_matches 已排序，这里主要是确保唯一性）
+                    # 我们添加/更新它。由于 all_matches 的原始字符串已去重，
+                    # 相同的 corrected_path 只能来自不同的原始字符串（如 "//url" 和 "https://url"）。
+                    # 我们只保留第一个遇到的（按 all_matches 的顺序，即原始文本中的顺序）。
+                    if corrected_path not in temp_processed_items:
+                         temp_processed_items[corrected_path] = {'original': match_obj, 'corrected_path': corrected_path}
+            
+            processed_matches = sorted(list(temp_processed_items.values()), key=lambda item: item['original'].start())
+
 
             if not processed_matches:
                 logger.debug("LLM响应处理器：未找到可识别的媒体，不进行特殊处理。")
@@ -101,6 +111,7 @@ class ToolCallNotifierPlugin(Star):
         if not has_media_extension:
             return False
         
+        # 对于本地文件路径 (以 / 或驱动器号开头)，只要格式正确且有媒体后缀，就认为是媒体
         if path_or_url.startswith('/') or re.match(r'^[a-zA-Z]:\\', path_or_url):
             return os.path.exists(path_or_url)
         
