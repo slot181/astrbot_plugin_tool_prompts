@@ -7,17 +7,24 @@ from astrbot.api.provider import LLMResponse
 import astrbot.api.message_components as Comp
 
 
-@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.1.0")
+@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.1.2")
 class ToolCallNotifierPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
         # 匹配URL (包括可能省略协议的//开头的) 和常见文件路径的正则表达式
-        self.url_pattern = re.compile(r'(?:https?:)?//[^\s"\'`<>]+') 
-        self.path_pattern = re.compile(r'(?:[a-zA-Z]:\\|/)[^\s"\'`<>]+')
+        # URL模式：匹配 http(s):// 或 // 开头的链接，排除空格、引号、反引号、尖括号和各种括号
+        self.url_pattern = re.compile(r'(?:https?:)?//[^\s"\'`<>()[\]{}]+')
+        # 路径模式：匹配驱动器号或/开头的路径，排除空格、引号、反引号、尖括号和各种括号
+        self.path_pattern = re.compile(r'(?:[a-zA-Z]:\\|/)[^\s"\'`<>`()[\]{}]+')
 
     @filter.on_llm_response(priority=1)
     async def on_llm_response_handler(self, event: AstrMessageEvent, resp: LLMResponse):
         """统一处理LLM响应，包括工具调用通知和媒体链接转换"""
+
+        # 检查事件是否已被本插件处理过媒体内容
+        if hasattr(event, '_media_processed_by_tool_prompts_plugin') and event._media_processed_by_tool_prompts_plugin:
+            logger.debug("LLM响应处理器：事件已由本插件处理过媒体，跳过。")
+            return
         
         if resp.role == "tool" and resp.tools_call_name:
             logger.info("LLM响应处理器：检测到工具调用。")
@@ -85,7 +92,8 @@ class ToolCallNotifierPlugin(Star):
             if plain_text_after:
                 await event.send(event.plain_result(plain_text_after))
 
-            logger.info("LLM响应处理器：将原始响应文本替换为空格以防止重复发送。")
+            logger.info("LLM响应处理器：将原始响应文本替换为空格以防止重复发送，并标记事件已处理。")
+            setattr(event, '_media_processed_by_tool_prompts_plugin', True) # 标记事件已被处理
             resp.completion_text = " "
 
     def _is_media(self, path_or_url: str) -> bool:
