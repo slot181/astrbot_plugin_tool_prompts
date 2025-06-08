@@ -7,7 +7,7 @@ from astrbot.api.provider import LLMResponse
 import astrbot.api.message_components as Comp
 
 
-@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.0.8")
+@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.1.0")
 class ToolCallNotifierPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -32,7 +32,18 @@ class ToolCallNotifierPlugin(Star):
             url_matches = list(self.url_pattern.finditer(text_to_process))
             path_matches = list(self.path_pattern.finditer(text_to_process))
             
-            all_matches = sorted(url_matches + path_matches, key=lambda m: m.start())
+            # 合并并基于匹配到的字符串进行去重
+            temp_matches = {} # 使用字典来去重，键是匹配的字符串，值是匹配对象
+            for match in url_matches + path_matches:
+                match_str = match.group(0)
+                # 如果新的匹配比已有的匹配更长或同样长但开始位置更早，则优先考虑（处理嵌套匹配的情况）
+                # 或者简单地，如果还没见过这个字符串，就添加它
+                if match_str not in temp_matches or \
+                   (len(match_str) > len(temp_matches[match_str].group(0))) or \
+                   (len(match_str) == len(temp_matches[match_str].group(0)) and match.start() < temp_matches[match_str].start()):
+                    temp_matches[match_str] = match
+            
+            all_matches = sorted(list(temp_matches.values()), key=lambda m: m.start())
 
             if not all_matches:
                 return
