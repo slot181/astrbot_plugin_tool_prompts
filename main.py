@@ -5,9 +5,11 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api.provider import LLMResponse
 import astrbot.api.message_components as Comp
+from astrbot.api.provider import ProviderRequest # 确保导入 ProviderRequest
+from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent # 用于类型检查和获取client
 
 
-@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.1.3")
+@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.1.5")
 class ToolCallNotifierPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -147,3 +149,129 @@ class ToolCallNotifierPlugin(Star):
     async def terminate(self):
         """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
         logger.info("工具调用和媒体链接处理插件已卸载。")
+
+    @filter.on_llm_request(priority=1) # 优先级设为1，确保在默认处理前执行
+    async def on_llm_request_handler(self, event: AstrMessageEvent, req: ProviderRequest):
+        """处理用户消息中的引用，并将其内容添加到LLM请求中"""
+        
+        # 仅处理 aiocqhttp (QQ) 平台的引用
+        if event.get_platform_name() != "aiocqhttp":
+            return
+
+        raw_message_chain = event.message_obj.message
+        reply_message_id_str = None
+
+        for segment in raw_message_chain:
+            if isinstance(segment, Comp.Reply):
+                # 尝试从 Comp.Reply 对象获取 message_id
+                # 根据 nakuru-project 的 Reply 结构，id 通常在 segment.data['id']
+                # 或者一些实现可能直接有 segment.id 属性
+                if hasattr(segment, 'data') and isinstance(segment.data, dict) and 'id' in segment.data:
+                    reply_message_id_str = str(segment.data['id'])
+                elif hasattr(segment, 'id'): # 备用方案
+                    reply_message_id_str = str(segment.id)
+                
+                if reply_message_id_str:
+                    logger.info(f"LLM请求预处理：检测到QQ引用消息，ID: {reply_message_id_str}")
+                else:
+                    logger.warning(f"LLM请求预处理：找到Reply段，但无法确定其message_id。段内容: {segment}")
+                break # 假设每条消息只有一个主要的引用段
+
+        if not reply_message_id_str:
+            return # 没有引用，或无法获取ID，正常处理
+
+        try:
+            client = None
+            if isinstance(event, AiocqhttpMessageEvent):
+                client = event.bot
+            else:
+                # 尝试通过 context 获取 platform adapter 再获取 client
+                # 这部分可能需要根据 AstrBot 的具体实现调整
+                platform_adapter = self.context.get_platform(filter.PlatformAdapterType.AIOCQHTTP)
+                if platform_adapter and hasattr(platform_adapter, 'get_client'):
+                    client = platform_adapter.get_client()
+                elif platform_adapter and hasattr(platform_adapter, 'client'): # 有些适配器可能直接暴露 client
+                     client = platform_adapter.client
+
+
+            if not client:
+                logger.error("LLM请求预处理：无法获取到 aiocqhttp 客户端实例，无法处理引用消息。")
+                return
+
+            logger.info(f"LLM请求预处理：尝试使用 get_msg 获取被引用消息详情，ID: {reply_message_id_str}")
+            replied_message_data_wrapper = await client.api.call_action('get_msg', message_id=int(reply_message_id_str))
+            
+            if replied_message_data_wrapper and replied_message_data_wrapper.get('status') == 'ok' and replied_message_data_wrapper.get('data'):
+                replied_message_detail = replied_message_data_wrapper['data']
+                original_sender_nickname = replied_message_detail.get('sender', {}).get('card') or replied_message_detail.get('sender', {}).get('nickname', '未知用户')
+                
+                extracted_contents = [] # 用于存储解析出的文本和图片URL描述
+
+                if 'message' in replied_message_detail and isinstance(replied_message_detail['message'], list):
+                    for seg_idx, seg_data in enumerate(replied_message_detail['message']):
+                        seg_type = seg_data.get('type')
+                        seg_content_data = seg_data.get('data', {})
+                        
+                        if seg_type == 'text' and seg_content_data.get('text'):
+                            extracted_contents.append(seg_content_data['text'].strip())
+                        elif seg_type == 'image' and seg_content_data.get('url'):
+                            extracted_contents.append(f"[引用的图片{seg_idx+1} URL: {seg_content_data['url']}]")
+                        elif seg_type == 'record' and seg_content_data.get('url'):
+                             extracted_contents.append(f"[引用的语音{seg_idx+1} URL: {seg_content_data['url']}] (内容未转录)")
+                        elif seg_type == 'video' and seg_content_data.get('url'):
+                             extracted_contents.append(f"[引用的视频{seg_idx+1} URL: {seg_content_data['url']}]")
+                        # 可以根据需要添加对其他类型如 face, at 等的处理
+                
+                if extracted_contents:
+                    # 将解析到的引用内容整合到 LLM 请求的 contexts 中
+                    # 确保 req.contexts 是一个列表
+                    if req.contexts is None: # ProviderRequest 中的 contexts 可能为 None
+                        req.contexts = []
+                    
+                    # 检查原始请求中是否有 system prompt，如果有，保持在最前面
+                    system_prompt_entry = None
+                    if req.contexts and req.contexts[0].get('role') == 'system':
+                        system_prompt_entry = req.contexts.pop(0)
+
+                    # 构建引用内容的上下文条目
+                    # 将所有提取的引用内容合并为一个字符串，作为一条历史消息
+                    full_quoted_content = " ".join(extracted_contents)
+                    quoted_message_context = {
+                        "role": "user", # 或者根据 original_sender_nickname 判断是否是 "assistant"
+                        "content": f"用户 {event.get_sender_name()} 引用了 {original_sender_nickname} 的消息:\n\"\"\"\n{full_quoted_content}\n\"\"\""
+                    }
+                    
+                    # 构建新的 contexts 列表
+                    new_contexts = []
+                    if system_prompt_entry:
+                        new_contexts.append(system_prompt_entry)
+                    
+                    # 添加历史上下文 (来自原始 req.contexts)
+                    new_contexts.extend(req.contexts)
+                    
+                    # 添加我们构建的引用消息上下文
+                    new_contexts.append(quoted_message_context)
+                    
+                    # 添加当前用户的实际提问 (来自原始 req.prompt)
+                    if req.prompt: # 确保 prompt 非空
+                        # 避免重复添加如果 prompt 已在 contexts 末尾
+                        is_prompt_already_in_contexts = False
+                        if new_contexts and new_contexts[-1].get('role') == 'user' and new_contexts[-1].get('content') == req.prompt:
+                            is_prompt_already_in_contexts = True
+                        
+                        if not is_prompt_already_in_contexts:
+                            new_contexts.append({"role": "user", "content": req.prompt})
+                    
+                    req.contexts = new_contexts
+                    req.prompt = None # 所有信息已移至 contexts
+
+                    logger.info(f"LLM请求预处理：已将被引用消息内容整合到 LLM 请求的 contexts 中。")
+                    logger.debug(f"LLM请求预处理：新的 contexts: {req.contexts}")
+                else:
+                    logger.info("LLM请求预处理：被引用的消息未解析出有效内容。")
+            else:
+                logger.warning(f"LLM请求预处理：调用 get_msg 获取引用消息失败或未返回有效数据: {replied_message_data_wrapper}")
+
+        except Exception as e:
+            logger.error(f"LLM请求预处理：处理QQ引用消息时发生错误: {e}", exc_info=True)
+            # 出错时，不修改 req，让请求按原样发送
