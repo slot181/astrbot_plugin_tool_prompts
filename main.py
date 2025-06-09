@@ -9,7 +9,7 @@ from astrbot.api.provider import ProviderRequest # 确保导入 ProviderRequest
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent # 用于类型检查和获取client
 
 
-@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.1.6", "https://github.com/slot181/astrbot_plugin_tool_prompts")
+@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.1.7", "https://github.com/slot181/astrbot_plugin_tool_prompts")
 class ToolCallNotifierPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -266,7 +266,7 @@ class ToolCallNotifierPlugin(Star):
                             new_contexts.append({"role": "user", "content": req.prompt})
                     
                     req.contexts = new_contexts
-                    req.prompt = None # 所有信息已移至 contexts
+                    req.prompt = " " # 设置为空字符串而非None，以避免后续拼接错误
 
                     logger.info(f"LLM请求预处理：已将被引用消息内容整合到 LLM 请求的 contexts 中。")
                     logger.debug(f"LLM请求预处理：新的 contexts: {req.contexts}")
