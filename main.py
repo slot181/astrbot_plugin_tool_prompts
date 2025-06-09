@@ -9,7 +9,7 @@ from astrbot.api.provider import ProviderRequest # 确保导入 ProviderRequest
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent # 用于类型检查和获取client
 
 
-@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.1.5")
+@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.1.5", "https://github.com/slot181/astrbot_plugin_tool_prompts")
 class ToolCallNotifierPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
