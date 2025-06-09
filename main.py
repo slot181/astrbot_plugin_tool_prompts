@@ -9,7 +9,7 @@ from astrbot.api.provider import ProviderRequest # 确保导入 ProviderRequest
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent # 用于类型检查和获取client
 
 
-@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.1.5", "https://github.com/slot181/astrbot_plugin_tool_prompts")
+@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.1.6", "https://github.com/slot181/astrbot_plugin_tool_prompts")
 class ToolCallNotifierPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -115,7 +115,7 @@ class ToolCallNotifierPlugin(Star):
         
         # 对于本地文件路径 (以 / 或驱动器号开头)，只要格式正确且有媒体后缀，就认为是媒体
         if path_or_url.startswith('/') or re.match(r'^[a-zA-Z]:\\', path_or_url):
-            return os.path.exists(path_or_url)
+            return os.path.exists(path_or_url) # 恢复 os.path.exists() 检查
         
         # 对于URL，我们假设它是可访问的，如果它有媒体后缀
         if path_or_url.lower().startswith('http:') or path_or_url.lower().startswith('https:'):
@@ -199,15 +199,18 @@ class ToolCallNotifierPlugin(Star):
                 return
 
             logger.info(f"LLM请求预处理：尝试使用 get_msg 获取被引用消息详情，ID: {reply_message_id_str}")
-            replied_message_data_wrapper = await client.api.call_action('get_msg', message_id=int(reply_message_id_str))
+            # client.api.call_action 成功时通常直接返回 OneBot 标准中的 "data" 部分，或者在失败时抛出异常
+            # 因此，我们直接检查返回的是否是包含消息内容的有效字典
+            replied_message_detail = await client.api.call_action('get_msg', message_id=int(reply_message_id_str))
             
-            if replied_message_data_wrapper and replied_message_data_wrapper.get('status') == 'ok' and replied_message_data_wrapper.get('data'):
-                replied_message_detail = replied_message_data_wrapper['data']
+            # 检查返回的是否是一个字典，并且包含关键的消息字段，如 'message' 和 'message_id'
+            if isinstance(replied_message_detail, dict) and 'message_id' in replied_message_detail and 'message' in replied_message_detail:
+                logger.info(f"LLM请求预处理：成功获取被引用消息详情: {replied_message_detail}")
                 original_sender_nickname = replied_message_detail.get('sender', {}).get('card') or replied_message_detail.get('sender', {}).get('nickname', '未知用户')
                 
                 extracted_contents = [] # 用于存储解析出的文本和图片URL描述
 
-                if 'message' in replied_message_detail and isinstance(replied_message_detail['message'], list):
+                if isinstance(replied_message_detail['message'], list):
                     for seg_idx, seg_data in enumerate(replied_message_detail['message']):
                         seg_type = seg_data.get('type')
                         seg_content_data = seg_data.get('data', {})
@@ -270,7 +273,7 @@ class ToolCallNotifierPlugin(Star):
                 else:
                     logger.info("LLM请求预处理：被引用的消息未解析出有效内容。")
             else:
-                logger.warning(f"LLM请求预处理：调用 get_msg 获取引用消息失败或未返回有效数据: {replied_message_data_wrapper}")
+                logger.warning(f"LLM请求预处理：调用 get_msg 获取引用消息失败或返回数据格式不符合预期: {replied_message_detail}")
 
         except Exception as e:
             logger.error(f"LLM请求预处理：处理QQ引用消息时发生错误: {e}", exc_info=True)
