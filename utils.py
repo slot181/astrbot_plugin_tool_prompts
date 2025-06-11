@@ -40,52 +40,67 @@ def get_temp_media_dir(plugin_data_dir: Path) -> Path:
 async def download_media(url: str, temp_dir: Path, file_name_prefix: str = "downloaded_") -> Path | None:
     """从URL下载媒体文件到临时目录"""
     if not temp_dir:
-        plugin_logger.error("下载媒体失败：临时目录无效。")
+        plugin_logger.error("下载媒体失败：临时目录无效或未初始化。")
         return None
+    
+    plugin_logger.info(f"开始下载媒体文件从 URL: {url} 到目录: {temp_dir}")
     try:
+        # 确保目录存在 (虽然 get_temp_media_dir 应该已经创建了)
+        if not temp_dir.exists():
+            plugin_logger.warning(f"临时目录 {temp_dir} 不存在，尝试创建。")
+            try:
+                temp_dir.mkdir(parents=True, exist_ok=True)
+            except Exception as e_mkdir:
+                plugin_logger.error(f"下载前创建临时目录失败: {temp_dir}, 错误: {e_mkdir}")
+                return None
+
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as response:
-                if response.status == 200:
-                    # 尝试从URL或Content-Disposition获取文件名和扩展名
-                    content_disposition = response.headers.get('Content-Disposition')
-                    original_filename = None
-                    if content_disposition:
-                        filenames = re.findall("filename\*?=([^']+''|[^;]+)", content_disposition)
-                        if filenames:
-                            fn = filenames[0]
-                            if fn.lower().startswith("utf-8''"):
-                                original_filename = urllib.parse.unquote(fn[7:], encoding='utf-8')
-                            else:
-                                original_filename = urllib.parse.unquote(fn)
-                    
-                    if not original_filename: # 从URL路径获取
-                        parsed_url = urllib.parse.urlparse(url)
-                        original_filename = os.path.basename(parsed_url.path)
+                response.raise_for_status() # 如果状态码不是 2xx，则抛出异常
+                
+                # 尝试从URL或Content-Disposition获取文件名和扩展名
+                content_disposition = response.headers.get('Content-Disposition')
+                original_filename = None
+                if content_disposition:
+                    filenames = re.findall("filename\*?=([^']+''|[^;]+)", content_disposition)
+                    if filenames:
+                        fn = filenames[0]
+                        if fn.lower().startswith("utf-8''"):
+                            original_filename = urllib.parse.unquote(fn[7:], encoding='utf-8')
+                        else:
+                            original_filename = urllib.parse.unquote(fn)
+                
+                if not original_filename: # 从URL路径获取
+                    parsed_url = urllib.parse.urlparse(url)
+                    original_filename = os.path.basename(parsed_url.path)
 
-                    if not original_filename: # 最终回退
-                        original_filename = "media_file"
+                if not original_filename: # 最终回退
+                    original_filename = "media_file"
 
-                    # 清理文件名并添加时间戳以确保唯一性
-                    base, ext = os.path.splitext(original_filename)
-                    # 移除或替换文件名中的非法字符 (简化版)
-                    safe_base = "".join(c if c.isalnum() or c in ('_','-') else '_' for c in base)
-                    timestamp = int(time.time() * 1000)
-                    filename = f"{file_name_prefix}{safe_base}_{timestamp}{ext if ext else '.tmp'}"
-                    
-                    file_path = temp_dir / filename
-                    with open(file_path, 'wb') as f:
-                        while True:
-                            chunk = await response.content.read(1024)
-                            if not chunk:
-                                break
-                            f.write(chunk)
-                    plugin_logger.info(f"媒体文件已下载到: {file_path} (来自URL: {url})")
-                    return file_path
-                else:
-                    plugin_logger.error(f"下载媒体文件失败 (状态码: {response.status}): {url}")
-                    return None
+                # 清理文件名并添加时间戳以确保唯一性
+                base, ext = os.path.splitext(original_filename)
+                # 移除或替换文件名中的非法字符 (简化版)
+                safe_base = "".join(c if c.isalnum() or c in ('_','-') else '_' for c in base)
+                timestamp = int(time.time() * 1000)
+                filename = f"{file_name_prefix}{safe_base}_{timestamp}{ext if ext else '.tmp'}"
+                
+                file_path = temp_dir / filename
+                with open(file_path, 'wb') as f:
+                    while True:
+                        chunk = await response.content.read(1024)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                plugin_logger.info(f"媒体文件成功下载并保存到: {file_path} (来自URL: {url})")
+                return file_path
+    except aiohttp.ClientResponseError as e_http:
+        plugin_logger.error(f"下载媒体文件HTTP错误 (状态码: {e_http.status}, URL: {url}): {e_http.message}")
+        return None
+    except asyncio.TimeoutError:
+        plugin_logger.error(f"下载媒体文件超时 (URL: {url})")
+        return None
     except Exception as e:
-        plugin_logger.error(f"下载媒体文件时发生错误: {url}, 错误: {e}", exc_info=True)
+        plugin_logger.error(f"下载媒体文件时发生未知错误 (URL: {url}): {e}", exc_info=True)
         return None
 
 def get_mime_type(file_path: Path) -> str | None:

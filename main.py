@@ -6,10 +6,10 @@ import typing # 导入 typing 用于 Any 类型提示
 
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
-from astrbot.api.provider import LLMResponse, ProviderRequest # 移除了 BaseProvider
-from astrbot.api import AstrBotConfig # 修改导入路径以符合文档
+from astrbot.api.provider import LLMResponse, ProviderRequest
+from astrbot.api import AstrBotConfig
 import astrbot.api.message_components as Comp
-from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent # 用于类型检查和获取client
+from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
 
 from .utils import (
     get_temp_media_dir,
@@ -17,34 +17,48 @@ from .utils import (
     get_mime_type,
     file_to_base64,
     cleanup_temp_files,
-    plugin_logger # 使用 utils 中的 logger
+    plugin_logger
 )
 
 
-@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.2.0", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号由用户管理
+@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.2.1", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号由用户管理
 class ToolCallNotifierPlugin(Star):
-    def __init__(self, context: Context, config: AstrBotConfig): # 添加 config 参数
+    def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
         self.temp_media_dir = None
 
-        # 设置日志级别
         log_level_str = self.config.get("log_level", "INFO").upper()
         plugin_logger.setLevel(log_level_str)
-        plugin_logger.info(f"插件 '{self.metadata.name if hasattr(self, 'metadata') else 'ToolCallNotifierPlugin'}' 日志级别设置为: {log_level_str}")
+        
+        plugin_name_for_path = "astrbot_plugin_tool_prompts"
+        if hasattr(self, 'metadata') and self.metadata and hasattr(self.metadata, 'name') and self.metadata.name:
+            plugin_name_for_path = self.metadata.name
+        else:
+            plugin_logger.warning("无法从 self.metadata.name 获取插件名，将使用默认名 'astrbot_plugin_tool_prompts' 构建数据路径。")
 
-        # 初始化并清理临时媒体目录
-        if hasattr(self, 'data_dir_path') and self.data_dir_path:
-            self.temp_media_dir = get_temp_media_dir(Path(self.data_dir_path))
+        # 使用用户期望的路径结构：./data/plugins_data/<plugin_name>/
+        # 这假设 AstrBot 从其根目录运行
+        base_data_path = Path("./data/plugins_data") / plugin_name_for_path
+        
+        try:
+            # base_data_path.mkdir(parents=True, exist_ok=True) # get_temp_media_dir 会创建父目录
+            # plugin_logger.info(f"插件数据基础路径设置为: {base_data_path.resolve()}")
+            self.temp_media_dir = get_temp_media_dir(base_data_path) # utils.get_temp_media_dir 会在 base_data_path 下创建 temp_media
+            
             if self.temp_media_dir:
+                plugin_logger.info(f"临时媒体目录已初始化: {self.temp_media_dir.resolve()}")
                 cleanup_minutes = self.config.get("temp_file_cleanup_minutes", 60)
                 if cleanup_minutes > 0:
                     plugin_logger.info(f"插件初始化：执行临时文件清理，目录: {self.temp_media_dir}, 清理周期: {cleanup_minutes} 分钟。")
                     cleanup_temp_files(self.temp_media_dir, cleanup_minutes)
                 else:
                     plugin_logger.info("插件初始化：临时文件自动清理已禁用 (周期设置为0或更小)。")
-        else:
-            plugin_logger.warning("插件初始化：无法获取插件数据目录 (self.data_dir_path)，临时文件功能可能受限。")
+            else:
+                plugin_logger.error(f"临时媒体目录未能成功初始化于: {base_data_path}")
+        except Exception as e:
+            plugin_logger.error(f"创建插件数据基础路径 {base_data_path} 或临时媒体目录失败: {e}", exc_info=True)
+            self.temp_media_dir = None
 
         self.url_pattern = re.compile(r'(?:https?:)?//[^\s"\'`<>()[\]{}]+')
         self.path_pattern = re.compile(r'(?:[a-zA-Z]:\\|/)[^\s"\'`<>`()[\]{}]+')
@@ -52,7 +66,6 @@ class ToolCallNotifierPlugin(Star):
 
     @filter.on_llm_response(priority=1)
     async def on_llm_response_handler(self, event: AstrMessageEvent, resp: LLMResponse):
-        """统一处理LLM响应，包括工具调用通知和媒体链接转换"""
         if hasattr(event, '_media_processed_by_tool_prompts_plugin') and event._media_processed_by_tool_prompts_plugin:
             plugin_logger.debug("LLM响应处理器：事件已由本插件处理过媒体，跳过。")
             return
@@ -143,17 +156,36 @@ class ToolCallNotifierPlugin(Star):
         plugin_logger.debug(f"媒体处理：路径 '{path_or_url}' 未匹配任何已知媒体类型，将作为纯文本处理。")
         return Comp.Plain(text=path_or_url)
 
-    async def _prepare_multimodal_parts(self, replied_message_segments: list, current_provider: typing.Any) -> list: # 使用 typing.Any
+    async def _prepare_multimodal_parts(self, replied_message_segments: list, current_provider: typing.Any) -> list:
         parts = []
         enable_gemini_native = self.config.get("enable_gemini_native_multimodal", False)
+        gemini_provider_id_from_config = self.config.get("gemini_provider_id", "").strip()
         enable_non_gemini_image = self.config.get("enable_non_gemini_multimodal_image", False)
         
-        provider_name = "unknown"
+        current_provider_id = None
+        actual_provider_name = "unknown" # 用于日志和判断逻辑
+
         if current_provider:
-            if hasattr(current_provider, 'get_provider_name'): # 优先尝试方法
-                provider_name = current_provider.get_provider_name().lower()
-            elif hasattr(current_provider, 'name'): # 备用，尝试属性
-                 provider_name = current_provider.name.lower()
+            if hasattr(current_provider, 'id'):
+                current_provider_id = str(current_provider.id).strip() # 确保是字符串并去除空格
+            
+            # 尝试获取 provider 名称用于日志
+            if hasattr(current_provider, 'get_provider_name'):
+                actual_provider_name = current_provider.get_provider_name().lower()
+            elif hasattr(current_provider, 'name'):
+                 actual_provider_name = current_provider.name.lower()
+        
+        plugin_logger.debug(f"当前Provider对象: {current_provider}, 解析出的ID: '{current_provider_id}', 解析出的名称: '{actual_provider_name}'")
+        plugin_logger.debug(f"配置中的Gemini Provider ID: '{gemini_provider_id_from_config}'")
+
+        is_gemini_provider = bool(gemini_provider_id_from_config and \
+                                  current_provider_id and \
+                                  current_provider_id == gemini_provider_id_from_config)
+        
+        if is_gemini_provider:
+            plugin_logger.info(f"当前LLM Provider (ID: '{current_provider_id}') 被识别为配置的Gemini Provider。")
+        else:
+            plugin_logger.info(f"当前LLM Provider (ID: '{current_provider_id}', 名称: '{actual_provider_name}') 未匹配配置的Gemini Provider ID ('{gemini_provider_id_from_config}')。")
 
         for seg_idx, seg_data in enumerate(replied_message_segments):
             seg_type = seg_data.get('type')
@@ -163,7 +195,7 @@ class ToolCallNotifierPlugin(Star):
             if seg_type == 'text' and seg_content_data.get('text'):
                 parts.append({"type": "text", "text": seg_content_data['text'].strip()})
             elif seg_type == 'image' and media_url:
-                if provider_name == "gemini" and enable_gemini_native:
+                if is_gemini_provider and enable_gemini_native:
                     if not self.temp_media_dir:
                         plugin_logger.warning(f"Gemini图片处理跳过：临时目录未初始化。URL: {media_url}")
                         parts.append({"type": "text", "text": f"[引用的图片{seg_idx+1}，下载失败，URL: {media_url}]"})
@@ -174,13 +206,12 @@ class ToolCallNotifierPlugin(Star):
                         base64_data = file_to_base64(downloaded_file)
                         if base64_data:
                             plugin_logger.info(f"Gemini原生：准备图片 part (Base64) for {media_url}")
-                            gemini_part_data = {"type": "inline_data", "mime_type": mime_type, "data": base64_data, "original_url": media_url}
-                            parts.append(gemini_part_data)
+                            parts.append({"type": "inline_data", "mime_type": mime_type, "data": base64_data, "original_url": media_url})
                         else:
                             parts.append({"type": "text", "text": f"[引用的图片{seg_idx+1}，Base64编码失败，URL: {media_url}]"})
                     else:
                         parts.append({"type": "text", "text": f"[引用的图片{seg_idx+1}，下载失败，URL: {media_url}]"})
-                elif provider_name != "gemini" and enable_non_gemini_image:
+                elif not is_gemini_provider and enable_non_gemini_image:
                     if not self.temp_media_dir:
                         plugin_logger.warning(f"非Gemini图片处理跳过：临时目录未初始化。URL: {media_url}")
                         parts.append({"type": "text", "text": f"[引用的图片{seg_idx+1}，下载失败，URL: {media_url}]"})
@@ -191,8 +222,7 @@ class ToolCallNotifierPlugin(Star):
                         base64_data = file_to_base64(downloaded_file)
                         if base64_data:
                             plugin_logger.info(f"非Gemini：准备图片 part (data URI) for {media_url}")
-                            openai_part_data = {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{base64_data}"}, "original_url": media_url}
-                            parts.append(openai_part_data)
+                            parts.append({"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{base64_data}"}, "original_url": media_url})
                         else:
                             parts.append({"type": "text", "text": f"[引用的图片{seg_idx+1}，Base64编码失败，URL: {media_url}]"})
                     else:
@@ -201,7 +231,7 @@ class ToolCallNotifierPlugin(Star):
                     parts.append({"type": "text", "text": f"[引用的图片{seg_idx+1} URL: {media_url}]"})
             elif seg_type in ['record', 'video'] and media_url:
                 media_kind = "语音" if seg_type == 'record' else "视频"
-                if provider_name == "gemini" and enable_gemini_native:
+                if is_gemini_provider and enable_gemini_native:
                     if not self.temp_media_dir:
                         plugin_logger.warning(f"Gemini{media_kind}处理跳过：临时目录未初始化。URL: {media_url}")
                         parts.append({"type": "text", "text": f"[引用的{media_kind}{seg_idx+1}，下载失败，URL: {media_url}]"})
@@ -212,8 +242,7 @@ class ToolCallNotifierPlugin(Star):
                         base64_data = file_to_base64(downloaded_file)
                         if base64_data:
                             plugin_logger.info(f"Gemini原生：准备{media_kind} part (Base64) for {media_url}")
-                            gemini_media_part_data = {"type": "inline_data", "mime_type": mime_type, "data": base64_data, "original_url": media_url}
-                            parts.append(gemini_media_part_data)
+                            parts.append({"type": "inline_data", "mime_type": mime_type, "data": base64_data, "original_url": media_url})
                         else:
                             parts.append({"type": "text", "text": f"[引用的{media_kind}{seg_idx+1}，Base64编码失败，URL: {media_url}]"})
                     else:
@@ -280,19 +309,24 @@ class ToolCallNotifierPlugin(Star):
                     if req.contexts and req.contexts[0].get('role') == 'system':
                         system_prompt_entry = req.contexts.pop(0)
 
-                    provider_name_for_check = "unknown"
-                    if current_provider:
-                        if hasattr(current_provider, 'get_provider_name'): provider_name_for_check = current_provider.get_provider_name().lower()
-                        elif hasattr(current_provider, 'name'): provider_name_for_check = current_provider.name.lower()
+                    gemini_provider_id_from_config = self.config.get("gemini_provider_id", "").strip()
+                    current_provider_id = str(current_provider.id).strip() if current_provider and hasattr(current_provider, 'id') else None
                     
-                    is_gemini_native_mode = (provider_name_for_check == "gemini" and self.config.get("enable_gemini_native_multimodal", False))
-                    is_non_gemini_image_mode = (provider_name_for_check != "gemini" and self.config.get("enable_non_gemini_multimodal_image", False) and any(p.get("type") == "image_url" for p in processed_parts))
+                    is_gemini_provider = bool(gemini_provider_id_from_config and \
+                                              current_provider_id and \
+                                              current_provider_id == gemini_provider_id_from_config)
+                    
+                    enable_gemini_native = self.config.get("enable_gemini_native_multimodal", False)
+                    enable_non_gemini_image = self.config.get("enable_non_gemini_multimodal_image", False)
 
+                    is_gemini_multimodal_active = is_gemini_provider and enable_gemini_native and any(p.get("type") != "text" for p in processed_parts)
+                    is_other_multimodal_active = not is_gemini_provider and enable_non_gemini_image and any(p.get("type") == "image_url" for p in processed_parts)
+                    
                     actual_quoted_contexts = []
                     prefix = f"用户 {event.get_sender_name()} 引用了 {original_sender_nickname} 的消息内容如下:\n\"\"\"\n"
                     suffix = "\n\"\"\""
 
-                    if (is_gemini_native_mode and any(p.get("type") != "text" for p in processed_parts)) or is_non_gemini_image_mode:
+                    if is_gemini_multimodal_active or is_other_multimodal_active:
                         content_parts_for_llm = []
                         if prefix.strip(): content_parts_for_llm.append({"type": "text", "text": prefix.strip()})
                         current_text_batch = []
@@ -303,9 +337,9 @@ class ToolCallNotifierPlugin(Star):
                                 if current_text_batch:
                                     content_parts_for_llm.append({"type": "text", "text": " ".join(current_text_batch)})
                                     current_text_batch = []
-                                if part_data.get("type") == "inline_data" and is_gemini_native_mode:
+                                if part_data.get("type") == "inline_data" and is_gemini_multimodal_active:
                                     content_parts_for_llm.append({"inline_data": {"mime_type": part_data.get("mime_type"), "data": part_data.get("data")}})
-                                elif part_data.get("type") == "image_url" and is_non_gemini_image_mode:
+                                elif part_data.get("type") == "image_url" and is_other_multimodal_active:
                                     content_parts_for_llm.append(part_data)
                                 else: 
                                      current_text_batch.append(f"[{part_data.get('type')} @ {part_data.get('original_url', '未知URL')}]")
@@ -351,7 +385,7 @@ class ToolCallNotifierPlugin(Star):
                         req.contexts = new_contexts
                         req.prompt = " " 
                         plugin_logger.info(f"LLM请求预处理：已整合引用内容到 contexts。")
-                        plugin_logger.debug(f"LLM请求预处理：新的 contexts 长度: {len(req.contexts)}")
+                        plugin_logger.debug(f"LLM请求预处理：新的 contexts: {req.contexts}")
                     else:
                         plugin_logger.info("LLM请求预处理：未构建有效的引用上下文条目。")
                         if system_prompt_entry and req.contexts : req.contexts.insert(0, system_prompt_entry) 
