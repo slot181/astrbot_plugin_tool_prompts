@@ -21,7 +21,7 @@ from .utils import (
 )
 
 
-@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.2.3", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号由用户管理
+@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.2.4", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号由用户管理
 class ToolCallNotifierPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -159,41 +159,14 @@ class ToolCallNotifierPlugin(Star):
     async def _prepare_multimodal_parts(self, replied_message_segments: list) -> list:
         parts = []
         enable_gemini_native = self.config.get("enable_gemini_native_multimodal", False)
-        # 获取用户在插件配置中填写的 Gemini Provider ID
-        gemini_provider_id_from_plugin_config = self.config.get("gemini_provider_id", "").strip()
+        # 新增：读取 provider 模式开关
+        is_gemini_mode_active = self.config.get("is_gemini_provider_mode", False)
         enable_non_gemini_image = self.config.get("enable_non_gemini_multimodal_image", False)
 
-        provider_instance_for_multimodal = None
-        is_gemini_provider_scenario = False # 默认为非 Gemini 场景
-
-        if gemini_provider_id_from_plugin_config:
-            plugin_logger.info(f"尝试从插件配置的 gemini_provider_id '{gemini_provider_id_from_plugin_config}' 获取Provider实例。")
-            try:
-                provider_instance_for_multimodal = self.context.get_provider_by_id(gemini_provider_id_from_plugin_config)
-                if provider_instance_for_multimodal:
-                    # 记录获取到的 provider 实例信息，避免直接打印整个对象
-                    provider_details_for_log = {
-                        "id": getattr(provider_instance_for_multimodal, 'id', 'N/A'),
-                        "name": getattr(provider_instance_for_multimodal, 'name', 'N/A'),
-                        "type": type(provider_instance_for_multimodal).__name__
-                    }
-                    plugin_logger.info(f"通过 get_provider_by_id('{gemini_provider_id_from_plugin_config}') 成功获取Provider实例: {provider_details_for_log}")
-                    # 如果成功获取，则认为是 Gemini Provider 的场景
-                    is_gemini_provider_scenario = True
-                else:
-                    plugin_logger.error(f"通过 get_provider_by_id('{gemini_provider_id_from_plugin_config}') 未获取到Provider实例 (返回None)。")
-            except Exception as e:
-                plugin_logger.error(f"调用 get_provider_by_id('{gemini_provider_id_from_plugin_config}') 时发生错误: {e}", exc_info=True)
+        if is_gemini_mode_active:
+            plugin_logger.info("当前提供商模式为: Gemini (基于插件配置 is_gemini_provider_mode)。")
         else:
-            plugin_logger.info("插件配置中未指定 gemini_provider_id，将按非Gemini Provider场景处理多模态。")
-
-        if is_gemini_provider_scenario:
-            plugin_logger.info(f"当前场景被识别为 Gemini Provider (基于插件配置 ID: '{gemini_provider_id_from_plugin_config}')。")
-        else:
-            plugin_logger.info(f"当前场景被识别为非 Gemini Provider (插件配置 ID '{gemini_provider_id_from_plugin_config}' 未提供或获取实例失败)。")
-            # 对于非Gemini场景，如果需要一个provider对象来进行某些通用操作（尽管此处主要用于类型判断），
-            # 可以考虑使用 self.context.get_using_provider()，但其ID和Name不用于is_gemini_provider的判断。
-            # 但根据当前需求，is_gemini_provider_scenario 的判断已独立。
+            plugin_logger.info("当前提供商模式为: OpenAI/兼容 (基于插件配置 is_gemini_provider_mode)。")
 
         for seg_idx, seg_data in enumerate(replied_message_segments):
             seg_type = seg_data.get('type')
@@ -203,7 +176,8 @@ class ToolCallNotifierPlugin(Star):
             if seg_type == 'text' and seg_content_data.get('text'):
                 parts.append({"type": "text", "text": seg_content_data['text'].strip()})
             elif seg_type == 'image' and media_url:
-                if is_gemini_provider and enable_gemini_native:
+                # 修复 NameError: is_gemini_provider -> is_gemini_mode_active
+                if is_gemini_mode_active and enable_gemini_native:
                     if not self.temp_media_dir:
                         plugin_logger.warning(f"Gemini图片处理跳过：临时目录未初始化。URL: {media_url}")
                         parts.append({"type": "text", "text": f"[引用的图片{seg_idx+1}，下载失败，URL: {media_url}]"})
@@ -219,7 +193,8 @@ class ToolCallNotifierPlugin(Star):
                             parts.append({"type": "text", "text": f"[引用的图片{seg_idx+1}，Base64编码失败，URL: {media_url}]"})
                     else:
                         parts.append({"type": "text", "text": f"[引用的图片{seg_idx+1}，下载失败，URL: {media_url}]"})
-                elif not is_gemini_provider and enable_non_gemini_image:
+                # 修复 NameError: is_gemini_provider -> is_gemini_mode_active
+                elif not is_gemini_mode_active and enable_non_gemini_image:
                     if not self.temp_media_dir:
                         plugin_logger.warning(f"非Gemini图片处理跳过：临时目录未初始化。URL: {media_url}")
                         parts.append({"type": "text", "text": f"[引用的图片{seg_idx+1}，下载失败，URL: {media_url}]"})
@@ -249,7 +224,8 @@ class ToolCallNotifierPlugin(Star):
                     parts.append({"type": "text", "text": f"[引用的图片{seg_idx+1} URL: {media_url}]"})
             elif seg_type in ['record', 'video'] and media_url:
                 media_kind = "语音" if seg_type == 'record' else "视频"
-                if is_gemini_provider and enable_gemini_native:
+                # 修复 NameError: is_gemini_provider -> is_gemini_mode_active
+                if is_gemini_mode_active and enable_gemini_native:
                     if not self.temp_media_dir:
                         plugin_logger.warning(f"Gemini{media_kind}处理跳过：临时目录未初始化。URL: {media_url}")
                         parts.append({"type": "text", "text": f"[引用的{media_kind}{seg_idx+1}，下载失败，URL: {media_url}]"})
@@ -318,7 +294,6 @@ class ToolCallNotifierPlugin(Star):
                 replied_segments = replied_message_detail.get('message', [])
                 if not isinstance(replied_segments, list): replied_segments = []
                 
-                # _prepare_multimodal_parts 不再需要 current_provider 参数
                 processed_parts = await self._prepare_multimodal_parts(replied_segments)
                 
                 if processed_parts:
@@ -328,31 +303,19 @@ class ToolCallNotifierPlugin(Star):
                         system_prompt_entry = req.contexts.pop(0)
                     
                     # 获取插件配置中的相关设置
-                    gemini_provider_id_from_plugin_config = self.config.get("gemini_provider_id", "").strip()
+                    is_gemini_mode_active_for_handler = self.config.get("is_gemini_provider_mode", False)
                     enable_gemini_native = self.config.get("enable_gemini_native_multimodal", False)
                     enable_non_gemini_image = self.config.get("enable_non_gemini_multimodal_image", False)
-
-                    # 判断是否为Gemini场景，与_prepare_multimodal_parts中的逻辑保持一致
-                    # 这里我们直接复用 _prepare_multimodal_parts 内部的 is_gemini_provider_scenario 状态是不行的，
-                    # 因为那个状态是局部的。我们需要重新判断或传递。
-                    # 简单起见，我们在这里重新进行一次判断，或者让 _prepare_multimodal_parts 返回这个状态。
-                    # 为了减少耦合，这里重新判断。
                     
-                    # 尝试获取由插件配置指定的Provider实例，以确定是否为Gemini场景
-                    # 这个 provider_instance 主要用于判断，不一定直接用于调用
-                    is_gemini_scenario_for_request_handler = False
-                    if gemini_provider_id_from_plugin_config:
-                        try:
-                            # 此处不重复调用 get_provider_by_id，仅用于逻辑判断分支
-                            # 实际的 provider 实例由 _prepare_multimodal_parts 内部处理
-                            # 这里我们只需要知道配置的ID是否存在，来决定分支
-                            if self.context.get_provider_by_id(gemini_provider_id_from_plugin_config) is not None:
-                                is_gemini_scenario_for_request_handler = True
-                        except Exception:
-                            pass # 获取失败，则不是gemini场景
+                    plugin_logger.debug(f"on_llm_request_handler: is_gemini_mode_active_for_handler={is_gemini_mode_active_for_handler}, "
+                                       f"enable_gemini_native={enable_gemini_native}, "
+                                       f"enable_non_gemini_image={enable_non_gemini_image}")
 
-                    is_gemini_multimodal_active = is_gemini_scenario_for_request_handler and enable_gemini_native and any(p.get("type") != "text" for p in processed_parts)
-                    is_other_multimodal_active = not is_gemini_scenario_for_request_handler and enable_non_gemini_image and any(p.get("type") == "image_url" for p in processed_parts)
+                    is_gemini_multimodal_active = is_gemini_mode_active_for_handler and enable_gemini_native and any(p.get("type") != "text" for p in processed_parts)
+                    is_other_multimodal_active = not is_gemini_mode_active_for_handler and enable_non_gemini_image and any(p.get("type") == "image_url" for p in processed_parts)
+                    
+                    plugin_logger.debug(f"on_llm_request_handler: is_gemini_multimodal_active={is_gemini_multimodal_active}, "
+                                       f"is_other_multimodal_active={is_other_multimodal_active}")
                     
                     actual_quoted_contexts = []
                     prefix = f"用户 {event.get_sender_name()} 引用了 {original_sender_nickname} 的消息内容如下:\n\"\"\"\n"
@@ -427,6 +390,51 @@ class ToolCallNotifierPlugin(Star):
                 plugin_logger.warning(f"LLM请求预处理：调用 get_msg 失败或数据格式不符合预期: {replied_message_detail}")
         except Exception as e:
             plugin_logger.error(f"LLM请求预处理：处理QQ引用消息时发生错误: {e}", exc_info=True)
+
+    # --- 新增指令组和指令 ---
+    @filter.command_group("toolprompts_settings", alias={"tps"})
+    @filter.permission_type(filter.PermissionType.ADMIN) # 指令组级别权限控制
+    async def toolprompts_settings_group(self, event: AstrMessageEvent):
+        """管理 Tool Prompts 插件的设置。"""
+        # 当只输入主指令时，可以显示帮助信息或当前状态
+        # 为简化，此处不处理，AstrBot默认会显示子指令列表
+        pass
+
+    @toolprompts_settings_group.command("provider_mode", alias={"pm"})
+    async def set_provider_mode(self, event: AstrMessageEvent, mode: str):
+        """
+        设置多模态处理时使用的提供商模式。
+        参数:
+            mode (str): 'gemini' 或 'openai'
+        """
+        normalized_mode = mode.lower().strip()
+        reply_msg = ""
+
+        if normalized_mode == "gemini":
+            self.config["is_gemini_provider_mode"] = True
+            reply_msg = "提供商模式已成功设置为: Gemini。"
+        elif normalized_mode == "openai":
+            self.config["is_gemini_provider_mode"] = False
+            reply_msg = "提供商模式已成功设置为: OpenAI (兼容)。"
+        else:
+            reply_msg = f"错误：无效的模式 '{mode}'。请使用 'gemini' 或 'openai'。"
+            await event.send(event.plain_result(reply_msg))
+            return
+
+        try:
+            self.config.save_config()
+            plugin_logger.info(f"Provider mode set to {'Gemini' if self.config['is_gemini_provider_mode'] else 'OpenAI'} by admin {event.get_sender_id()}/{event.get_sender_name()}.")
+            await event.send(event.plain_result(reply_msg))
+        except Exception as e:
+            plugin_logger.error(f"保存插件配置失败: {e}", exc_info=True)
+            await event.send(event.plain_result("错误：保存配置失败，请检查后台日志。"))
+
+    @toolprompts_settings_group.command("get_provider_mode", alias={"gpm"})
+    async def get_provider_mode(self, event: AstrMessageEvent):
+        """获取当前设置的提供商模式。"""
+        is_gemini_mode = self.config.get("is_gemini_provider_mode", False)
+        current_mode_str = "Gemini" if is_gemini_mode else "OpenAI (兼容)"
+        await event.send(event.plain_result(f"当前提供商处理模式为: {current_mode_str}"))
 
     async def terminate(self):
         plugin_logger.info(f"插件 '{self.metadata.name if hasattr(self, 'metadata') else 'ToolCallNotifierPlugin'}' 正在终止...")

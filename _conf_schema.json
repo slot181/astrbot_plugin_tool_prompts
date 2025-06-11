@@ -5,11 +5,10 @@
     "default": false,
     "hint": "如果您的Gemini模型和AstrBot适配器支持，开启此项可获得更丰富的多模态体验。"
   },
-  "gemini_provider_id": {
-    "description": "【Gemini专用】指定您系统中代表 Gemini 服务的提供商ID。",
-    "type": "string",
-    "default": "",
-    "hint": "请填写您在 AstrBot 中配置的 Gemini 提供商的唯一ID。插件将用此ID判断是否启用Gemini原生多模态。"
+  "is_gemini_provider_mode": {
+    "description": "启用Gemini提供商特定处理模式 (打开=Gemini, 关闭=OpenAI兼容模式)",
+    "type": "bool",
+    "default": false
   },
   "enable_non_gemini_multimodal_image": {
     "description": "【非Gemini模型】是否对引用消息中的图片启用多模态处理（转为Base64）。",

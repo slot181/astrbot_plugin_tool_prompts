@@ -175,33 +175,4 @@ import re
 import urllib.parse
 
 if __name__ == '__main__':
-    # 简单的测试 (在实际插件环境中不会这样运行)
-    # 需要手动创建一个 data/astrbot_plugin_tool_prompts 目录来测试
-    # current_plugin_data_dir = Path("data") / "astrbot_plugin_tool_prompts" # 模拟插件数据目录
-    # test_temp_dir = get_temp_media_dir(current_plugin_data_dir)
-    # if test_temp_dir:
-    #     print(f"测试临时目录: {test_temp_dir}")
-        
-        # 测试下载 (需要一个有效的URL)
-        # test_url = "https://www.google.com/images/branding/googlelogo/1x/googlelogo_color_272x92dp.png"
-        # downloaded_file = asyncio.run(download_media(test_url, test_temp_dir))
-        # if downloaded_file:
-        #     print(f"下载测试: {downloaded_file}")
-        #     mime = get_mime_type(downloaded_file)
-        #     print(f"MIME类型: {mime}")
-        #     b64 = file_to_base64(downloaded_file)
-        #     # print(f"Base64: {b64[:100]}...") # 打印前100个字符
-
-        # 测试清理 (创建一些假文件)
-        # for i in range(3):
-        #     with open(test_temp_dir / f"fake_old_file_{i}.txt", "w") as f:
-        #         f.write("old")
-        #     # 修改文件时间戳使其看起来像是旧文件
-        #     old_time = time.time() - (70 * 60) # 70分钟前
-        #     os.utime(test_temp_dir / f"fake_old_file_{i}.txt", (old_time, old_time))
-
-        # with open(test_temp_dir / "fake_new_file.txt", "w") as f:
-        #     f.write("new")
-        
-        # cleanup_temp_files(test_temp_dir, 60) # 清理60分钟前的文件
     pass
