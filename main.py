@@ -21,7 +21,7 @@ from .utils import (
 )
 
 
-@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.2.2", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号由用户管理
+@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.2.3", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号由用户管理
 class ToolCallNotifierPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -156,80 +156,44 @@ class ToolCallNotifierPlugin(Star):
         plugin_logger.debug(f"媒体处理：路径 '{path_or_url}' 未匹配任何已知媒体类型，将作为纯文本处理。")
         return Comp.Plain(text=path_or_url)
 
-    async def _prepare_multimodal_parts(self, replied_message_segments: list, current_provider: typing.Any) -> list:
+    async def _prepare_multimodal_parts(self, replied_message_segments: list) -> list:
         parts = []
         enable_gemini_native = self.config.get("enable_gemini_native_multimodal", False)
-        gemini_provider_id_from_config = self.config.get("gemini_provider_id", "").strip()
+        # 获取用户在插件配置中填写的 Gemini Provider ID
+        gemini_provider_id_from_plugin_config = self.config.get("gemini_provider_id", "").strip()
         enable_non_gemini_image = self.config.get("enable_non_gemini_multimodal_image", False)
-        
-        # 获取并记录 AstrBot 的全局配置，用于调试 Provider 信息
-        astrbot_config = self.context.get_config()
-        plugin_logger.debug(f"AstrBot全局配置: {astrbot_config}")
 
-        # 从 AstrBot 全局配置中尝试获取当前 Provider 的详细信息
-        # 注意：这里的 'provider' 或 'providers' 键名需要根据实际日志输出确认
-        # 假设当前激活的 provider 配置在 astrbot_config['provider']
-        # 或者如果所有 provider 列表在 astrbot_config['providers']
-        current_provider_config_details = None
-        current_provider_id_from_global_config = None
-        actual_provider_name_from_global_config = "unknown_from_global_config"
+        provider_instance_for_multimodal = None
+        is_gemini_provider_scenario = False # 默认为非 Gemini 场景
 
-        # 优先使用 current_provider 对象（如果存在且有效）的 ID
-        # 如果 current_provider 对象没有 ID，或者需要更详细的配置，则尝试从全局配置中查找
-        current_provider_id_from_object = None
-        if current_provider and hasattr(current_provider, 'id'):
-            current_provider_id_from_object = str(current_provider.id).strip()
-
-        if astrbot_config:
-            # 尝试从 'provider' (单个激活的) 或 'providers' (列表) 中获取
-            # 这部分逻辑可能需要根据 astrbot_config 的实际结构调整
-            active_provider_entry = astrbot_config.get('provider') # 假设这是当前激活的 provider
-            if isinstance(active_provider_entry, dict) and 'id' in active_provider_entry:
-                current_provider_config_details = active_provider_entry
-                current_provider_id_from_global_config = str(active_provider_entry.get('id', '')).strip()
-                actual_provider_name_from_global_config = str(active_provider_entry.get('name', actual_provider_name_from_global_config)).lower()
-                plugin_logger.info(f"从全局配置 config['provider'] 中获取到提供商信息: ID='{current_provider_id_from_global_config}', Name='{actual_provider_name_from_global_config}'")
-            else:
-                # 如果 config['provider'] 不是期望的格式，或者想从 providers 列表中匹配
-                all_providers_list = astrbot_config.get('providers')
-                if isinstance(all_providers_list, list) and current_provider_id_from_object:
-                    for p_conf in all_providers_list:
-                        if isinstance(p_conf, dict) and str(p_conf.get('id','')).strip() == current_provider_id_from_object:
-                            current_provider_config_details = p_conf
-                            current_provider_id_from_global_config = current_provider_id_from_object
-                            actual_provider_name_from_global_config = str(p_conf.get('name', actual_provider_name_from_global_config)).lower()
-                            plugin_logger.info(f"从全局配置 config['providers'] 列表中匹配到提供商信息: ID='{current_provider_id_from_global_config}', Name='{actual_provider_name_from_global_config}'")
-                            break
-                if not current_provider_config_details:
-                     plugin_logger.warning("未能从全局配置中定位到当前Provider的详细配置。")
-        
-        # 根据用户反馈，Provider ID 和 Name 应完全依赖从全局配置中解析的结果
-        # current_provider 对象（来自 get_using_provider()）不再用于获取 ID 或 Name
-        final_current_provider_id = current_provider_id_from_global_config
-        final_actual_provider_name = actual_provider_name_from_global_config
-
-        if not final_current_provider_id:
-            plugin_logger.error("关键错误：未能从全局配置中解析出当前Provider的ID。多模态处理可能不按预期工作。")
-            # 尝试从 current_provider 对象获取ID作为最后的备用，但不推荐
-            if current_provider_id_from_object:
-                final_current_provider_id = current_provider_id_from_object
-                plugin_logger.warning(f"备用方案：使用从current_provider对象获取的ID: {final_current_provider_id}")
-            else:
-                plugin_logger.error("备用方案也失败：current_provider对象也没有ID。")
-
-
-        plugin_logger.info(f"最终用于判断的Provider ID (来自全局配置): '{final_current_provider_id}', "
-                           f"名称 (来自全局配置): '{final_actual_provider_name}'")
-        plugin_logger.debug(f"配置中的Gemini Provider ID: '{gemini_provider_id_from_config}'")
-
-        is_gemini_provider = bool(gemini_provider_id_from_config and \
-                                  final_current_provider_id and \
-                                  final_current_provider_id == gemini_provider_id_from_config)
-        
-        if is_gemini_provider:
-            plugin_logger.info(f"当前LLM Provider (ID: '{final_current_provider_id}', 基于全局配置) 被识别为配置的Gemini Provider。")
+        if gemini_provider_id_from_plugin_config:
+            plugin_logger.info(f"尝试从插件配置的 gemini_provider_id '{gemini_provider_id_from_plugin_config}' 获取Provider实例。")
+            try:
+                provider_instance_for_multimodal = self.context.get_provider_by_id(gemini_provider_id_from_plugin_config)
+                if provider_instance_for_multimodal:
+                    # 记录获取到的 provider 实例信息，避免直接打印整个对象
+                    provider_details_for_log = {
+                        "id": getattr(provider_instance_for_multimodal, 'id', 'N/A'),
+                        "name": getattr(provider_instance_for_multimodal, 'name', 'N/A'),
+                        "type": type(provider_instance_for_multimodal).__name__
+                    }
+                    plugin_logger.info(f"通过 get_provider_by_id('{gemini_provider_id_from_plugin_config}') 成功获取Provider实例: {provider_details_for_log}")
+                    # 如果成功获取，则认为是 Gemini Provider 的场景
+                    is_gemini_provider_scenario = True
+                else:
+                    plugin_logger.error(f"通过 get_provider_by_id('{gemini_provider_id_from_plugin_config}') 未获取到Provider实例 (返回None)。")
+            except Exception as e:
+                plugin_logger.error(f"调用 get_provider_by_id('{gemini_provider_id_from_plugin_config}') 时发生错误: {e}", exc_info=True)
         else:
-            plugin_logger.info(f"当前LLM Provider (ID: '{final_current_provider_id}', 名称: '{final_actual_provider_name}', 基于全局配置) 未匹配配置的Gemini Provider ID ('{gemini_provider_id_from_config}')。")
+            plugin_logger.info("插件配置中未指定 gemini_provider_id，将按非Gemini Provider场景处理多模态。")
+
+        if is_gemini_provider_scenario:
+            plugin_logger.info(f"当前场景被识别为 Gemini Provider (基于插件配置 ID: '{gemini_provider_id_from_plugin_config}')。")
+        else:
+            plugin_logger.info(f"当前场景被识别为非 Gemini Provider (插件配置 ID '{gemini_provider_id_from_plugin_config}' 未提供或获取实例失败)。")
+            # 对于非Gemini场景，如果需要一个provider对象来进行某些通用操作（尽管此处主要用于类型判断），
+            # 可以考虑使用 self.context.get_using_provider()，但其ID和Name不用于is_gemini_provider的判断。
+            # 但根据当前需求，is_gemini_provider_scenario 的判断已独立。
 
         for seg_idx, seg_data in enumerate(replied_message_segments):
             seg_type = seg_data.get('type')
@@ -353,28 +317,42 @@ class ToolCallNotifierPlugin(Star):
                 original_sender_nickname = replied_message_detail.get('sender', {}).get('card') or replied_message_detail.get('sender', {}).get('nickname', '未知用户')
                 replied_segments = replied_message_detail.get('message', [])
                 if not isinstance(replied_segments, list): replied_segments = []
-
-                current_provider = self.context.get_using_provider()
-                processed_parts = await self._prepare_multimodal_parts(replied_segments, current_provider)
+                
+                # _prepare_multimodal_parts 不再需要 current_provider 参数
+                processed_parts = await self._prepare_multimodal_parts(replied_segments)
                 
                 if processed_parts:
                     if req.contexts is None: req.contexts = []
                     system_prompt_entry = None
                     if req.contexts and req.contexts[0].get('role') == 'system':
                         system_prompt_entry = req.contexts.pop(0)
-
-                    gemini_provider_id_from_config = self.config.get("gemini_provider_id", "").strip()
-                    current_provider_id = str(current_provider.id).strip() if current_provider and hasattr(current_provider, 'id') else None
                     
-                    is_gemini_provider = bool(gemini_provider_id_from_config and \
-                                              current_provider_id and \
-                                              current_provider_id == gemini_provider_id_from_config)
-                    
+                    # 获取插件配置中的相关设置
+                    gemini_provider_id_from_plugin_config = self.config.get("gemini_provider_id", "").strip()
                     enable_gemini_native = self.config.get("enable_gemini_native_multimodal", False)
                     enable_non_gemini_image = self.config.get("enable_non_gemini_multimodal_image", False)
 
-                    is_gemini_multimodal_active = is_gemini_provider and enable_gemini_native and any(p.get("type") != "text" for p in processed_parts)
-                    is_other_multimodal_active = not is_gemini_provider and enable_non_gemini_image and any(p.get("type") == "image_url" for p in processed_parts)
+                    # 判断是否为Gemini场景，与_prepare_multimodal_parts中的逻辑保持一致
+                    # 这里我们直接复用 _prepare_multimodal_parts 内部的 is_gemini_provider_scenario 状态是不行的，
+                    # 因为那个状态是局部的。我们需要重新判断或传递。
+                    # 简单起见，我们在这里重新进行一次判断，或者让 _prepare_multimodal_parts 返回这个状态。
+                    # 为了减少耦合，这里重新判断。
+                    
+                    # 尝试获取由插件配置指定的Provider实例，以确定是否为Gemini场景
+                    # 这个 provider_instance 主要用于判断，不一定直接用于调用
+                    is_gemini_scenario_for_request_handler = False
+                    if gemini_provider_id_from_plugin_config:
+                        try:
+                            # 此处不重复调用 get_provider_by_id，仅用于逻辑判断分支
+                            # 实际的 provider 实例由 _prepare_multimodal_parts 内部处理
+                            # 这里我们只需要知道配置的ID是否存在，来决定分支
+                            if self.context.get_provider_by_id(gemini_provider_id_from_plugin_config) is not None:
+                                is_gemini_scenario_for_request_handler = True
+                        except Exception:
+                            pass # 获取失败，则不是gemini场景
+
+                    is_gemini_multimodal_active = is_gemini_scenario_for_request_handler and enable_gemini_native and any(p.get("type") != "text" for p in processed_parts)
+                    is_other_multimodal_active = not is_gemini_scenario_for_request_handler and enable_non_gemini_image and any(p.get("type") == "image_url" for p in processed_parts)
                     
                     actual_quoted_contexts = []
                     prefix = f"用户 {event.get_sender_name()} 引用了 {original_sender_nickname} 的消息内容如下:\n\"\"\"\n"
