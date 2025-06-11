@@ -1,20 +1,8 @@
 {
-  "enable_gemini_native_multimodal": {
-    "description": "【Gemini专用】是否启用原生多模态处理引用消息中的媒体（图片、视频、音频）。开启后，会尝试将媒体文件内容直接发送给Gemini。",
-    "type": "bool",
-    "default": false,
-    "hint": "如果您的Gemini模型和AstrBot适配器支持，开启此项可获得更丰富的多模态体验。"
-  },
-  "is_gemini_provider_mode": {
-    "description": "启用Gemini提供商特定处理模式 (打开=Gemini, 关闭=OpenAI兼容模式)",
+  "enable_multimodal_processing": {
+    "description": "是否对引用消息中的图片启用多模态处理。开启后，图片将作为图像数据发送给LLM；关闭则作为文本链接。",
     "type": "bool",
     "default": false
-  },
-  "enable_non_gemini_multimodal_image": {
-    "description": "【非Gemini模型】是否对引用消息中的图片启用多模态处理（转为Base64）。",
-    "type": "bool",
-    "default": false,
-    "hint": "开启此项前，请确保您使用的非Gemini模型支持通过Base64接收图片数据。视频和音频仍会转为文本描述。"
   },
   "temp_file_cleanup_minutes": {
     "description": "临时媒体文件自动清理周期（分钟）。插件会尝试清理超过此时长的已下载临时文件。",

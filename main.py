@@ -21,7 +21,7 @@ from .utils import (
 )
 
 
-@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.2.4", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号由用户管理
+@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.2.5", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号由用户管理
 class ToolCallNotifierPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -66,6 +66,7 @@ class ToolCallNotifierPlugin(Star):
 
     @filter.on_llm_response(priority=1)
     async def on_llm_response_handler(self, event: AstrMessageEvent, resp: LLMResponse):
+        """LLM响应后处理：发送工具调用通知，处理并分条发送媒体链接。"""
         if hasattr(event, '_media_processed_by_tool_prompts_plugin') and event._media_processed_by_tool_prompts_plugin:
             plugin_logger.debug("LLM响应处理器：事件已由本插件处理过媒体，跳过。")
             return
@@ -158,15 +159,13 @@ class ToolCallNotifierPlugin(Star):
 
     async def _prepare_multimodal_parts(self, replied_message_segments: list) -> list:
         parts = []
-        enable_gemini_native = self.config.get("enable_gemini_native_multimodal", False)
-        # 新增：读取 provider 模式开关
-        is_gemini_mode_active = self.config.get("is_gemini_provider_mode", False)
-        enable_non_gemini_image = self.config.get("enable_non_gemini_multimodal_image", False)
+        # 读取新的统一多模态处理开关
+        multimodal_processing_enabled = self.config.get("enable_multimodal_processing", False)
 
-        if is_gemini_mode_active:
-            plugin_logger.info("当前提供商模式为: Gemini (基于插件配置 is_gemini_provider_mode)。")
+        if multimodal_processing_enabled:
+            plugin_logger.info("多模态处理已启用。将尝试处理引用消息中的图片。")
         else:
-            plugin_logger.info("当前提供商模式为: OpenAI/兼容 (基于插件配置 is_gemini_provider_mode)。")
+            plugin_logger.info("多模态处理已禁用。所有引用媒体将转换为文本描述。")
 
         for seg_idx, seg_data in enumerate(replied_message_segments):
             seg_type = seg_data.get('type')
@@ -176,10 +175,9 @@ class ToolCallNotifierPlugin(Star):
             if seg_type == 'text' and seg_content_data.get('text'):
                 parts.append({"type": "text", "text": seg_content_data['text'].strip()})
             elif seg_type == 'image' and media_url:
-                # 修复 NameError: is_gemini_provider -> is_gemini_mode_active
-                if is_gemini_mode_active and enable_gemini_native:
+                if multimodal_processing_enabled:
                     if not self.temp_media_dir:
-                        plugin_logger.warning(f"Gemini图片处理跳过：临时目录未初始化。URL: {media_url}")
+                        plugin_logger.warning(f"图片多模态处理跳过：临时目录未初始化。URL: {media_url}")
                         parts.append({"type": "text", "text": f"[引用的图片{seg_idx+1}，下载失败，URL: {media_url}]"})
                         continue
                     downloaded_file = await download_media(media_url, self.temp_media_dir, "img_")
@@ -187,66 +185,27 @@ class ToolCallNotifierPlugin(Star):
                         mime_type = get_mime_type(downloaded_file) or "image/jpeg"
                         base64_data = file_to_base64(downloaded_file)
                         if base64_data:
-                            plugin_logger.info(f"Gemini原生：准备图片 part (Base64) for {media_url}")
-                            parts.append({"type": "inline_data", "mime_type": mime_type, "data": base64_data, "original_url": media_url})
-                        else:
-                            parts.append({"type": "text", "text": f"[引用的图片{seg_idx+1}，Base64编码失败，URL: {media_url}]"})
-                    else:
-                        parts.append({"type": "text", "text": f"[引用的图片{seg_idx+1}，下载失败，URL: {media_url}]"})
-                # 修复 NameError: is_gemini_provider -> is_gemini_mode_active
-                elif not is_gemini_mode_active and enable_non_gemini_image:
-                    if not self.temp_media_dir:
-                        plugin_logger.warning(f"非Gemini图片处理跳过：临时目录未初始化。URL: {media_url}")
-                        parts.append({"type": "text", "text": f"[引用的图片{seg_idx+1}，下载失败，URL: {media_url}]"})
-                        continue
-                    downloaded_file = await download_media(media_url, self.temp_media_dir, "img_")
-                    if downloaded_file:
-                        mime_type = get_mime_type(downloaded_file) or "image/jpeg"
-                        base64_data = file_to_base64(downloaded_file)
-                        if base64_data:
-                            plugin_logger.info(f"非Gemini：准备图片 part (data URI) for {media_url}")
-                            # OpenAI API 要求 image_url 对象只包含 "url" 和可选的 "detail"
-                            # 移除 "original_url" 键，避免 API 错误
+                            plugin_logger.info(f"多模态启用：准备图片 part (data URI) for {media_url}")
                             parts.append({
                                 "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:{mime_type};base64,{base64_data}"
-                                    # "detail": "auto" # 可以根据需要添加 detail
-                                }
-                                # original_url: media_url # 此信息仅供内部使用，不发送给API
+                                "image_url": {"url": f"data:{mime_type};base64,{base64_data}"}
                             })
-                            plugin_logger.debug(f"非Gemini图片 part (original_url: {media_url}) 已准备，将发送给LLM的结构: {parts[-1]}")
+                            plugin_logger.debug(f"图片 part (original_url: {media_url}) 已准备，将发送给LLM的结构: {parts[-1]}")
                         else:
                             parts.append({"type": "text", "text": f"[引用的图片{seg_idx+1}，Base64编码失败，URL: {media_url}]"})
                     else:
                         parts.append({"type": "text", "text": f"[引用的图片{seg_idx+1}，下载失败，URL: {media_url}]"})
-                else:
+                else: # multimodal_processing_enabled is False
                     parts.append({"type": "text", "text": f"[引用的图片{seg_idx+1} URL: {media_url}]"})
             elif seg_type in ['record', 'video'] and media_url:
                 media_kind = "语音" if seg_type == 'record' else "视频"
-                # 修复 NameError: is_gemini_provider -> is_gemini_mode_active
-                if is_gemini_mode_active and enable_gemini_native:
-                    if not self.temp_media_dir:
-                        plugin_logger.warning(f"Gemini{media_kind}处理跳过：临时目录未初始化。URL: {media_url}")
-                        parts.append({"type": "text", "text": f"[引用的{media_kind}{seg_idx+1}，下载失败，URL: {media_url}]"})
-                        continue
-                    downloaded_file = await download_media(media_url, self.temp_media_dir, f"{seg_type}_")
-                    if downloaded_file:
-                        mime_type = get_mime_type(downloaded_file) or "application/octet-stream"
-                        base64_data = file_to_base64(downloaded_file)
-                        if base64_data:
-                            plugin_logger.info(f"Gemini原生：准备{media_kind} part (Base64) for {media_url}")
-                            parts.append({"type": "inline_data", "mime_type": mime_type, "data": base64_data, "original_url": media_url})
-                        else:
-                            parts.append({"type": "text", "text": f"[引用的{media_kind}{seg_idx+1}，Base64编码失败，URL: {media_url}]"})
-                    else:
-                        parts.append({"type": "text", "text": f"[引用的{media_kind}{seg_idx+1}，下载失败，URL: {media_url}]"})
-                else:
-                    parts.append({"type": "text", "text": f"[引用的{media_kind}{seg_idx+1} URL: {media_url} ({'内容未转录' if seg_type == 'record' else ''})]"})
+                # 语音和视频统一转换为文本描述
+                parts.append({"type": "text", "text": f"[引用的{media_kind}{seg_idx+1} URL: {media_url} ({'内容未转录' if seg_type == 'record' else ''})]"})
         return parts
 
     @filter.on_llm_request(priority=1)
     async def on_llm_request_handler(self, event: AstrMessageEvent, req: ProviderRequest):
+        """LLM请求前处理：处理引用消息中的媒体，注入上下文。"""
         if self.temp_media_dir:
             cleanup_minutes = self.config.get("temp_file_cleanup_minutes", 60)
             if cleanup_minutes > 0:
@@ -302,67 +261,70 @@ class ToolCallNotifierPlugin(Star):
                     if req.contexts and req.contexts[0].get('role') == 'system':
                         system_prompt_entry = req.contexts.pop(0)
                     
-                    # 获取插件配置中的相关设置
-                    is_gemini_mode_active_for_handler = self.config.get("is_gemini_provider_mode", False)
-                    enable_gemini_native = self.config.get("enable_gemini_native_multimodal", False)
-                    enable_non_gemini_image = self.config.get("enable_non_gemini_multimodal_image", False)
-                    
-                    plugin_logger.debug(f"on_llm_request_handler: is_gemini_mode_active_for_handler={is_gemini_mode_active_for_handler}, "
-                                       f"enable_gemini_native={enable_gemini_native}, "
-                                       f"enable_non_gemini_image={enable_non_gemini_image}")
+                    # 获取插件配置中的统一多模态开关状态
+                    multimodal_processing_enabled = self.config.get("enable_multimodal_processing", False)
+                    plugin_logger.debug(f"on_llm_request_handler: multimodal_processing_enabled={multimodal_processing_enabled}")
 
-                    is_gemini_multimodal_active = is_gemini_mode_active_for_handler and enable_gemini_native and any(p.get("type") != "text" for p in processed_parts)
-                    is_other_multimodal_active = not is_gemini_mode_active_for_handler and enable_non_gemini_image and any(p.get("type") == "image_url" for p in processed_parts)
+                    # 判断是否应该构建多模态请求 (即开关打开且处理后的parts里确实有图片)
+                    should_form_multimodal_request = multimodal_processing_enabled and any(p.get("type") == "image_url" for p in processed_parts)
                     
-                    plugin_logger.debug(f"on_llm_request_handler: is_gemini_multimodal_active={is_gemini_multimodal_active}, "
-                                       f"is_other_multimodal_active={is_other_multimodal_active}")
+                    plugin_logger.debug(f"on_llm_request_handler: should_form_multimodal_request={should_form_multimodal_request}")
                     
                     actual_quoted_contexts = []
                     prefix = f"用户 {event.get_sender_name()} 引用了 {original_sender_nickname} 的消息内容如下:\n\"\"\"\n"
                     suffix = "\n\"\"\""
 
-                    if is_gemini_multimodal_active or is_other_multimodal_active:
+                    if should_form_multimodal_request:
+                        # 构建多模态请求内容 (包含图片和文本)
                         content_parts_for_llm = []
                         if prefix.strip(): content_parts_for_llm.append({"type": "text", "text": prefix.strip()})
+                        
                         current_text_batch = []
                         for part_data in processed_parts:
                             if part_data.get("type") == "text":
-                                current_text_batch.append(part_data.get("text",""))
-                            else: 
-                                if current_text_batch:
-                                    content_parts_for_llm.append({"type": "text", "text": " ".join(current_text_batch)})
+                                current_text_batch.append(part_data.get("text","").strip())
+                            elif part_data.get("type") == "image_url": # 只处理 image_url 类型
+                                if current_text_batch: # 先添加累积的文本
+                                    combined_text = " ".join(filter(None, current_text_batch))
+                                    if combined_text:
+                                        content_parts_for_llm.append({"type": "text", "text": combined_text})
                                     current_text_batch = []
-                                if part_data.get("type") == "inline_data" and is_gemini_multimodal_active:
-                                    content_parts_for_llm.append({"inline_data": {"mime_type": part_data.get("mime_type"), "data": part_data.get("data")}})
-                                elif part_data.get("type") == "image_url" and is_other_multimodal_active:
-                                    content_parts_for_llm.append(part_data)
-                                else: 
-                                     current_text_batch.append(f"[{part_data.get('type')} @ {part_data.get('original_url', '未知URL')}]")
-                        if current_text_batch:
-                            content_parts_for_llm.append({"type": "text", "text": " ".join(current_text_batch)})
+                                content_parts_for_llm.append(part_data) # 添加 image_url part
+                            # 其他类型的 part (如语音/视频的文本描述) 会被包含在 current_text_batch 中
+                        
+                        if current_text_batch: # 添加末尾剩余的文本
+                            combined_text = " ".join(filter(None, current_text_batch))
+                            if combined_text:
+                                content_parts_for_llm.append({"type": "text", "text": combined_text})
+                        
                         if suffix.strip(): content_parts_for_llm.append({"type": "text", "text": suffix.strip()})
 
                         if content_parts_for_llm:
                              actual_quoted_contexts.append({"role": "user", "content": content_parts_for_llm})
+                             plugin_logger.info("LLM请求预处理：已构建多模态引用上下文。")
                         else:
-                            plugin_logger.info("LLM请求预处理：多模态处理后内容为空。")
+                            plugin_logger.info("LLM请求预处理：多模态处理后内容为空（未添加任何parts）。")
                     else: 
+                        # 构建纯文本请求内容 (所有媒体都已转为文本描述)
                         all_text_from_parts = []
                         for part_data in processed_parts:
+                            # 此时 processed_parts 中的所有元素都应该是 {"type": "text", "text": "..."} 结构
+                            # 或者图片已转为 "[引用的图片 URL: ...]" 格式的文本
                             if part_data.get("type") == "text":
-                                all_text_from_parts.append(part_data.get("text",""))
-                            elif part_data.get("type") == "inline_data":
-                                all_text_from_parts.append(f"[引用的媒体文件: {part_data.get('mime_type')} @ {part_data.get('original_url','未知URL')}]")
-                            elif part_data.get("type") == "image_url":
-                                all_text_from_parts.append(f"[引用的图片: {part_data.get('original_url','未知URL')}]")
-                        full_quoted_text = " ".join(all_text_from_parts).strip()
+                                all_text_from_parts.append(part_data.get("text","").strip())
+                            elif part_data.get("type") == "image_url": # 理论上不应进入此分支，因为 multimodal_processing_enabled 为 false
+                                 all_text_from_parts.append(f"[引用的图片 URL: {part_data.get('image_url',{}).get('url','未知URL')}]")
+                            # 其他类型已在 _prepare_multimodal_parts 中转为文本
+                        
+                        full_quoted_text = " ".join(filter(None, all_text_from_parts)).strip()
                         if full_quoted_text:
                             actual_quoted_contexts.append({
                                 "role": "user",
                                 "content": prefix + full_quoted_text + suffix
                             })
+                            plugin_logger.info("LLM请求预处理：已构建纯文本引用上下文。")
                         else:
-                            plugin_logger.info("LLM请求预处理：纯文本处理后内容为空。")
+                            plugin_logger.info("LLM请求预处理：纯文本引用内容为空。")
 
                     if actual_quoted_contexts:
                         new_contexts = []
@@ -393,48 +355,51 @@ class ToolCallNotifierPlugin(Star):
 
     # --- 新增指令组和指令 ---
     @filter.command_group("toolprompts_settings", alias={"tps"})
-    @filter.permission_type(filter.PermissionType.ADMIN) # 指令组级别权限控制
+    @filter.permission_type(filter.PermissionType.ADMIN)
     async def toolprompts_settings_group(self, event: AstrMessageEvent):
-        """管理 Tool Prompts 插件的设置。"""
-        # 当只输入主指令时，可以显示帮助信息或当前状态
-        # 为简化，此处不处理，AstrBot默认会显示子指令列表
+        """管理插件的多模态处理设置 (简写: /tps)。"""
         pass
 
-    @toolprompts_settings_group.command("provider_mode", alias={"pm"})
-    async def set_provider_mode(self, event: AstrMessageEvent, mode: str):
+    @toolprompts_settings_group.command("set_multimodal", alias={"sm"})
+    async def set_multimodal_status(self, event: AstrMessageEvent, status: str):
         """
-        设置多模态处理时使用的提供商模式。
-        参数:
-            mode (str): 'gemini' 或 'openai'
+        启用/禁用引用消息的多模态处理。
+        命令: /tps sm <on|off>
+        参数: status (str): 'on'/'off' 或等效词 (true/false, enable/disable, 1/0)。
         """
-        normalized_mode = mode.lower().strip()
+        normalized_status = status.lower().strip()
         reply_msg = ""
+        new_status = None
 
-        if normalized_mode == "gemini":
-            self.config["is_gemini_provider_mode"] = True
-            reply_msg = "提供商模式已成功设置为: Gemini。"
-        elif normalized_mode == "openai":
-            self.config["is_gemini_provider_mode"] = False
-            reply_msg = "提供商模式已成功设置为: OpenAI (兼容)。"
+        if normalized_status in ["on", "true", "enable", "1"]:
+            new_status = True
+            reply_msg = "引用消息的多模态处理已启用。"
+        elif normalized_status in ["off", "false", "disable", "0"]:
+            new_status = False
+            reply_msg = "引用消息的多模态处理已禁用。"
         else:
-            reply_msg = f"错误：无效的模式 '{mode}'。请使用 'gemini' 或 'openai'。"
+            reply_msg = f"错误：无效的状态 '{status}'。请使用 'on'/'true'/'enable'/'1' 或 'off'/'false'/'disable'/'0'。"
             await event.send(event.plain_result(reply_msg))
             return
 
+        self.config["enable_multimodal_processing"] = new_status
         try:
             self.config.save_config()
-            plugin_logger.info(f"Provider mode set to {'Gemini' if self.config['is_gemini_provider_mode'] else 'OpenAI'} by admin {event.get_sender_id()}/{event.get_sender_name()}.")
+            plugin_logger.info(f"Multimodal processing set to {new_status} by admin {event.get_sender_id()}/{event.get_sender_name()}.")
             await event.send(event.plain_result(reply_msg))
         except Exception as e:
-            plugin_logger.error(f"保存插件配置失败: {e}", exc_info=True)
+            plugin_logger.error(f"保存插件配置失败 (set_multimodal_status): {e}", exc_info=True)
             await event.send(event.plain_result("错误：保存配置失败，请检查后台日志。"))
 
-    @toolprompts_settings_group.command("get_provider_mode", alias={"gpm"})
-    async def get_provider_mode(self, event: AstrMessageEvent):
-        """获取当前设置的提供商模式。"""
-        is_gemini_mode = self.config.get("is_gemini_provider_mode", False)
-        current_mode_str = "Gemini" if is_gemini_mode else "OpenAI (兼容)"
-        await event.send(event.plain_result(f"当前提供商处理模式为: {current_mode_str}"))
+    @toolprompts_settings_group.command("get_multimodal_status", alias={"gms"})
+    async def get_multimodal_status(self, event: AstrMessageEvent):
+        """
+        获取当前引用消息的多模态处理状态。
+        命令: /tps gms
+        """
+        multimodal_enabled = self.config.get("enable_multimodal_processing", False)
+        status_str = "已启用" if multimodal_enabled else "已禁用"
+        await event.send(event.plain_result(f"当前引用消息的多模态处理状态为: {status_str}"))
 
     async def terminate(self):
         plugin_logger.info(f"插件 '{self.metadata.name if hasattr(self, 'metadata') else 'ToolCallNotifierPlugin'}' 正在终止...")
