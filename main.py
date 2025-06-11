@@ -21,7 +21,7 @@ from .utils import (
 )
 
 
-@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.2.5", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号由用户管理
+@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.2.6", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号由用户管理
 class ToolCallNotifierPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -285,7 +285,7 @@ class ToolCallNotifierPlugin(Star):
                                 current_text_batch.append(part_data.get("text","").strip())
                             elif part_data.get("type") == "image_url": # 只处理 image_url 类型
                                 if current_text_batch: # 先添加累积的文本
-                                    combined_text = " ".join(filter(None, current_text_batch))
+                                    combined_text = " ".join([s for s in current_text_batch if s])
                                     if combined_text:
                                         content_parts_for_llm.append({"type": "text", "text": combined_text})
                                     current_text_batch = []
@@ -293,7 +293,7 @@ class ToolCallNotifierPlugin(Star):
                             # 其他类型的 part (如语音/视频的文本描述) 会被包含在 current_text_batch 中
                         
                         if current_text_batch: # 添加末尾剩余的文本
-                            combined_text = " ".join(filter(None, current_text_batch))
+                            combined_text = " ".join([s for s in current_text_batch if s])
                             if combined_text:
                                 content_parts_for_llm.append({"type": "text", "text": combined_text})
                         
@@ -316,7 +316,7 @@ class ToolCallNotifierPlugin(Star):
                                  all_text_from_parts.append(f"[引用的图片 URL: {part_data.get('image_url',{}).get('url','未知URL')}]")
                             # 其他类型已在 _prepare_multimodal_parts 中转为文本
                         
-                        full_quoted_text = " ".join(filter(None, all_text_from_parts)).strip()
+                        full_quoted_text = " ".join([s for s in all_text_from_parts if s]).strip()
                         if full_quoted_text:
                             actual_quoted_contexts.append({
                                 "role": "user",
