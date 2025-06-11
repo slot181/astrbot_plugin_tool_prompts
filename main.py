@@ -7,7 +7,7 @@ import typing # 导入 typing 用于 Any 类型提示
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api.provider import LLMResponse, ProviderRequest # 移除了 BaseProvider
-from astrbot.api.config import AstrBotConfig # 用于类型提示
+from astrbot.api import AstrBotConfig # 修改导入路径以符合文档
 import astrbot.api.message_components as Comp
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent # 用于类型检查和获取client
 
@@ -21,7 +21,7 @@ from .utils import (
 )
 
 
-@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.1.9", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号由用户管理
+@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.2.0", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号由用户管理
 class ToolCallNotifierPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig): # 添加 config 参数
         super().__init__(context)

@@ -1,5 +1,5 @@
 name: astrbot_plugin_tool_prompts # 这是你的插件的唯一识别名。
 desc: 一个在LLM调用工具时发送通知，并能自动处理媒体链接的插件。 # 插件简短描述
-version: v0.1.9 # 插件版本号。
+version: v0.2.0 # 插件版本号。
 author: slot181 # 作者
 repo: https://github.com/slot181/astrbot_plugin_tool_prompts # 请在这里填写你的插件仓库地址
