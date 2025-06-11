@@ -174,13 +174,6 @@ def cleanup_temp_files(temp_dir: Path, max_age_minutes: int):
 import re
 import urllib.parse
 
-# 异步任务，用于定期清理 (如果需要更主动的清理方式)
-# 但通常在插件加载或每次请求时清理一次就足够了
-# async def scheduled_cleanup_task(temp_dir: Path, cleanup_interval_seconds: int, max_age_minutes: int):
-#     while True:
-#         await asyncio.sleep(cleanup_interval_seconds)
-#         cleanup_temp_files(temp_dir, max_age_minutes)
-
 if __name__ == '__main__':
     # 简单的测试 (在实际插件环境中不会这样运行)
     # 需要手动创建一个 data/astrbot_plugin_tool_prompts 目录来测试

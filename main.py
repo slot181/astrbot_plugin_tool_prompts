@@ -21,7 +21,7 @@ from .utils import (
 )
 
 
-@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.2.1", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号由用户管理
+@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.2.2", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号由用户管理
 class ToolCallNotifierPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -162,30 +162,74 @@ class ToolCallNotifierPlugin(Star):
         gemini_provider_id_from_config = self.config.get("gemini_provider_id", "").strip()
         enable_non_gemini_image = self.config.get("enable_non_gemini_multimodal_image", False)
         
-        current_provider_id = None
-        actual_provider_name = "unknown" # 用于日志和判断逻辑
+        # 获取并记录 AstrBot 的全局配置，用于调试 Provider 信息
+        astrbot_config = self.context.get_config()
+        plugin_logger.debug(f"AstrBot全局配置: {astrbot_config}")
 
-        if current_provider:
-            if hasattr(current_provider, 'id'):
-                current_provider_id = str(current_provider.id).strip() # 确保是字符串并去除空格
-            
-            # 尝试获取 provider 名称用于日志
-            if hasattr(current_provider, 'get_provider_name'):
-                actual_provider_name = current_provider.get_provider_name().lower()
-            elif hasattr(current_provider, 'name'):
-                 actual_provider_name = current_provider.name.lower()
+        # 从 AstrBot 全局配置中尝试获取当前 Provider 的详细信息
+        # 注意：这里的 'provider' 或 'providers' 键名需要根据实际日志输出确认
+        # 假设当前激活的 provider 配置在 astrbot_config['provider']
+        # 或者如果所有 provider 列表在 astrbot_config['providers']
+        current_provider_config_details = None
+        current_provider_id_from_global_config = None
+        actual_provider_name_from_global_config = "unknown_from_global_config"
+
+        # 优先使用 current_provider 对象（如果存在且有效）的 ID
+        # 如果 current_provider 对象没有 ID，或者需要更详细的配置，则尝试从全局配置中查找
+        current_provider_id_from_object = None
+        if current_provider and hasattr(current_provider, 'id'):
+            current_provider_id_from_object = str(current_provider.id).strip()
+
+        if astrbot_config:
+            # 尝试从 'provider' (单个激活的) 或 'providers' (列表) 中获取
+            # 这部分逻辑可能需要根据 astrbot_config 的实际结构调整
+            active_provider_entry = astrbot_config.get('provider') # 假设这是当前激活的 provider
+            if isinstance(active_provider_entry, dict) and 'id' in active_provider_entry:
+                current_provider_config_details = active_provider_entry
+                current_provider_id_from_global_config = str(active_provider_entry.get('id', '')).strip()
+                actual_provider_name_from_global_config = str(active_provider_entry.get('name', actual_provider_name_from_global_config)).lower()
+                plugin_logger.info(f"从全局配置 config['provider'] 中获取到提供商信息: ID='{current_provider_id_from_global_config}', Name='{actual_provider_name_from_global_config}'")
+            else:
+                # 如果 config['provider'] 不是期望的格式，或者想从 providers 列表中匹配
+                all_providers_list = astrbot_config.get('providers')
+                if isinstance(all_providers_list, list) and current_provider_id_from_object:
+                    for p_conf in all_providers_list:
+                        if isinstance(p_conf, dict) and str(p_conf.get('id','')).strip() == current_provider_id_from_object:
+                            current_provider_config_details = p_conf
+                            current_provider_id_from_global_config = current_provider_id_from_object
+                            actual_provider_name_from_global_config = str(p_conf.get('name', actual_provider_name_from_global_config)).lower()
+                            plugin_logger.info(f"从全局配置 config['providers'] 列表中匹配到提供商信息: ID='{current_provider_id_from_global_config}', Name='{actual_provider_name_from_global_config}'")
+                            break
+                if not current_provider_config_details:
+                     plugin_logger.warning("未能从全局配置中定位到当前Provider的详细配置。")
         
-        plugin_logger.debug(f"当前Provider对象: {current_provider}, 解析出的ID: '{current_provider_id}', 解析出的名称: '{actual_provider_name}'")
+        # 根据用户反馈，Provider ID 和 Name 应完全依赖从全局配置中解析的结果
+        # current_provider 对象（来自 get_using_provider()）不再用于获取 ID 或 Name
+        final_current_provider_id = current_provider_id_from_global_config
+        final_actual_provider_name = actual_provider_name_from_global_config
+
+        if not final_current_provider_id:
+            plugin_logger.error("关键错误：未能从全局配置中解析出当前Provider的ID。多模态处理可能不按预期工作。")
+            # 尝试从 current_provider 对象获取ID作为最后的备用，但不推荐
+            if current_provider_id_from_object:
+                final_current_provider_id = current_provider_id_from_object
+                plugin_logger.warning(f"备用方案：使用从current_provider对象获取的ID: {final_current_provider_id}")
+            else:
+                plugin_logger.error("备用方案也失败：current_provider对象也没有ID。")
+
+
+        plugin_logger.info(f"最终用于判断的Provider ID (来自全局配置): '{final_current_provider_id}', "
+                           f"名称 (来自全局配置): '{final_actual_provider_name}'")
         plugin_logger.debug(f"配置中的Gemini Provider ID: '{gemini_provider_id_from_config}'")
 
         is_gemini_provider = bool(gemini_provider_id_from_config and \
-                                  current_provider_id and \
-                                  current_provider_id == gemini_provider_id_from_config)
+                                  final_current_provider_id and \
+                                  final_current_provider_id == gemini_provider_id_from_config)
         
         if is_gemini_provider:
-            plugin_logger.info(f"当前LLM Provider (ID: '{current_provider_id}') 被识别为配置的Gemini Provider。")
+            plugin_logger.info(f"当前LLM Provider (ID: '{final_current_provider_id}', 基于全局配置) 被识别为配置的Gemini Provider。")
         else:
-            plugin_logger.info(f"当前LLM Provider (ID: '{current_provider_id}', 名称: '{actual_provider_name}') 未匹配配置的Gemini Provider ID ('{gemini_provider_id_from_config}')。")
+            plugin_logger.info(f"当前LLM Provider (ID: '{final_current_provider_id}', 名称: '{final_actual_provider_name}', 基于全局配置) 未匹配配置的Gemini Provider ID ('{gemini_provider_id_from_config}')。")
 
         for seg_idx, seg_data in enumerate(replied_message_segments):
             seg_type = seg_data.get('type')
@@ -222,7 +266,17 @@ class ToolCallNotifierPlugin(Star):
                         base64_data = file_to_base64(downloaded_file)
                         if base64_data:
                             plugin_logger.info(f"非Gemini：准备图片 part (data URI) for {media_url}")
-                            parts.append({"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{base64_data}"}, "original_url": media_url})
+                            # OpenAI API 要求 image_url 对象只包含 "url" 和可选的 "detail"
+                            # 移除 "original_url" 键，避免 API 错误
+                            parts.append({
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{mime_type};base64,{base64_data}"
+                                    # "detail": "auto" # 可以根据需要添加 detail
+                                }
+                                # original_url: media_url # 此信息仅供内部使用，不发送给API
+                            })
+                            plugin_logger.debug(f"非Gemini图片 part (original_url: {media_url}) 已准备，将发送给LLM的结构: {parts[-1]}")
                         else:
                             parts.append({"type": "text", "text": f"[引用的图片{seg_idx+1}，Base64编码失败，URL: {media_url}]"})
                     else:
