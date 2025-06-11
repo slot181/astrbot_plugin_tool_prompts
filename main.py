@@ -2,10 +2,11 @@ import re
 import os
 from pathlib import Path
 import asyncio # 用于可能的异步操作
+import typing # 导入 typing 用于 Any 类型提示
 
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
-from astrbot.api.provider import LLMResponse, ProviderRequest, BaseProvider # 确保导入 ProviderRequest, BaseProvider
+from astrbot.api.provider import LLMResponse, ProviderRequest # 移除了 BaseProvider
 from astrbot.api.config import AstrBotConfig # 用于类型提示
 import astrbot.api.message_components as Comp
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent # 用于类型检查和获取client
@@ -20,7 +21,7 @@ from .utils import (
 )
 
 
-@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.1.8", "https://github.com/slot181/astrbot_plugin_tool_prompts")
+@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.1.7", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号由用户管理
 class ToolCallNotifierPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig): # 添加 config 参数
         super().__init__(context)
@@ -142,16 +143,16 @@ class ToolCallNotifierPlugin(Star):
         plugin_logger.debug(f"媒体处理：路径 '{path_or_url}' 未匹配任何已知媒体类型，将作为纯文本处理。")
         return Comp.Plain(text=path_or_url)
 
-    async def _prepare_multimodal_parts(self, replied_message_segments: list, current_provider: BaseProvider) -> list:
+    async def _prepare_multimodal_parts(self, replied_message_segments: list, current_provider: typing.Any) -> list: # 使用 typing.Any
         parts = []
         enable_gemini_native = self.config.get("enable_gemini_native_multimodal", False)
         enable_non_gemini_image = self.config.get("enable_non_gemini_multimodal_image", False)
         
         provider_name = "unknown"
         if current_provider:
-            if hasattr(current_provider, 'get_provider_name'):
+            if hasattr(current_provider, 'get_provider_name'): # 优先尝试方法
                 provider_name = current_provider.get_provider_name().lower()
-            elif hasattr(current_provider, 'name'):
+            elif hasattr(current_provider, 'name'): # 备用，尝试属性
                  provider_name = current_provider.name.lower()
 
         for seg_idx, seg_data in enumerate(replied_message_segments):
@@ -173,7 +174,8 @@ class ToolCallNotifierPlugin(Star):
                         base64_data = file_to_base64(downloaded_file)
                         if base64_data:
                             plugin_logger.info(f"Gemini原生：准备图片 part (Base64) for {media_url}")
-                            parts.append({"type": "inline_data", "mime_type": mime_type, "data": base64_data, "original_url": media_url})
+                            gemini_part_data = {"type": "inline_data", "mime_type": mime_type, "data": base64_data, "original_url": media_url}
+                            parts.append(gemini_part_data)
                         else:
                             parts.append({"type": "text", "text": f"[引用的图片{seg_idx+1}，Base64编码失败，URL: {media_url}]"})
                     else:
@@ -189,7 +191,8 @@ class ToolCallNotifierPlugin(Star):
                         base64_data = file_to_base64(downloaded_file)
                         if base64_data:
                             plugin_logger.info(f"非Gemini：准备图片 part (data URI) for {media_url}")
-                            parts.append({"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{base64_data}"}, "original_url": media_url})
+                            openai_part_data = {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{base64_data}"}, "original_url": media_url}
+                            parts.append(openai_part_data)
                         else:
                             parts.append({"type": "text", "text": f"[引用的图片{seg_idx+1}，Base64编码失败，URL: {media_url}]"})
                     else:
@@ -209,7 +212,8 @@ class ToolCallNotifierPlugin(Star):
                         base64_data = file_to_base64(downloaded_file)
                         if base64_data:
                             plugin_logger.info(f"Gemini原生：准备{media_kind} part (Base64) for {media_url}")
-                            parts.append({"type": "inline_data", "mime_type": mime_type, "data": base64_data, "original_url": media_url})
+                            gemini_media_part_data = {"type": "inline_data", "mime_type": mime_type, "data": base64_data, "original_url": media_url}
+                            parts.append(gemini_media_part_data)
                         else:
                             parts.append({"type": "text", "text": f"[引用的{media_kind}{seg_idx+1}，Base64编码失败，URL: {media_url}]"})
                     else:
@@ -289,44 +293,31 @@ class ToolCallNotifierPlugin(Star):
                     suffix = "\n\"\"\""
 
                     if (is_gemini_native_mode and any(p.get("type") != "text" for p in processed_parts)) or is_non_gemini_image_mode:
-                        # 构建多部分 content (Gemini parts 或 OpenAI image_url parts)
                         content_parts_for_llm = []
-                        # 先添加描述性文本前缀
                         if prefix.strip(): content_parts_for_llm.append({"type": "text", "text": prefix.strip()})
-                        
-                        # 添加处理过的媒体和文本 parts
-                        # 对于 Gemini，它期望 text 和 inline_data 交错。
-                        # 对于 OpenAI，它期望 text 和 image_url 交错。
                         current_text_batch = []
                         for part_data in processed_parts:
                             if part_data.get("type") == "text":
                                 current_text_batch.append(part_data.get("text",""))
-                            else: # inline_data or image_url
-                                if current_text_batch: # 先提交累积的文本
+                            else: 
+                                if current_text_batch:
                                     content_parts_for_llm.append({"type": "text", "text": " ".join(current_text_batch)})
                                     current_text_batch = []
-                                # 添加媒体 part
-                                if part_data.get("type") == "inline_data" and is_gemini_native_mode: # Gemini
+                                if part_data.get("type") == "inline_data" and is_gemini_native_mode:
                                     content_parts_for_llm.append({"inline_data": {"mime_type": part_data.get("mime_type"), "data": part_data.get("data")}})
-                                elif part_data.get("type") == "image_url" and is_non_gemini_image_mode: # OpenAI
-                                    content_parts_for_llm.append(part_data) #  {"type": "image_url", "image_url": ...}
-                                else: # 媒体无法按预期模式处理，转为文本描述
+                                elif part_data.get("type") == "image_url" and is_non_gemini_image_mode:
+                                    content_parts_for_llm.append(part_data)
+                                else: 
                                      current_text_batch.append(f"[{part_data.get('type')} @ {part_data.get('original_url', '未知URL')}]")
-
-
-                        if current_text_batch: # 添加末尾的文本
+                        if current_text_batch:
                             content_parts_for_llm.append({"type": "text", "text": " ".join(current_text_batch)})
-                        
-                        # 添加描述性文本后缀
                         if suffix.strip(): content_parts_for_llm.append({"type": "text", "text": suffix.strip()})
 
                         if content_parts_for_llm:
                              actual_quoted_contexts.append({"role": "user", "content": content_parts_for_llm})
-                        else: # 如果没有有效 parts，则不添加此上下文
+                        else:
                             plugin_logger.info("LLM请求预处理：多模态处理后内容为空。")
-
-
-                    else: # 纯文本模式
+                    else: 
                         all_text_from_parts = []
                         for part_data in processed_parts:
                             if part_data.get("type") == "text":
@@ -335,7 +326,6 @@ class ToolCallNotifierPlugin(Star):
                                 all_text_from_parts.append(f"[引用的媒体文件: {part_data.get('mime_type')} @ {part_data.get('original_url','未知URL')}]")
                             elif part_data.get("type") == "image_url":
                                 all_text_from_parts.append(f"[引用的图片: {part_data.get('original_url','未知URL')}]")
-                        
                         full_quoted_text = " ".join(all_text_from_parts).strip()
                         if full_quoted_text:
                             actual_quoted_contexts.append({
@@ -345,12 +335,11 @@ class ToolCallNotifierPlugin(Star):
                         else:
                             plugin_logger.info("LLM请求预处理：纯文本处理后内容为空。")
 
-
                     if actual_quoted_contexts:
                         new_contexts = []
                         if system_prompt_entry: new_contexts.append(system_prompt_entry)
-                        new_contexts.extend(req.contexts) # 原始历史
-                        new_contexts.extend(actual_quoted_contexts) # 引用内容
+                        new_contexts.extend(req.contexts) 
+                        new_contexts.extend(actual_quoted_contexts) 
 
                         if req.prompt and req.prompt.strip():
                             is_prompt_already_in_contexts = False
@@ -360,13 +349,12 @@ class ToolCallNotifierPlugin(Star):
                                 new_contexts.append({"role": "user", "content": req.prompt})
                         
                         req.contexts = new_contexts
-                        req.prompt = " " # 按用户要求
+                        req.prompt = " " 
                         plugin_logger.info(f"LLM请求预处理：已整合引用内容到 contexts。")
                         plugin_logger.debug(f"LLM请求预处理：新的 contexts 长度: {len(req.contexts)}")
                     else:
                         plugin_logger.info("LLM请求预处理：未构建有效的引用上下文条目。")
-                        if system_prompt_entry and req.contexts : req.contexts.insert(0, system_prompt_entry) # 恢复 system prompt
-
+                        if system_prompt_entry and req.contexts : req.contexts.insert(0, system_prompt_entry) 
                 else:
                     plugin_logger.info("LLM请求预处理：被引用的消息未解析出有效内容或处理后内容为空。")
             else:
