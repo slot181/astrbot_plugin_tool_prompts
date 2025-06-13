@@ -22,7 +22,7 @@ from .utils import (
 )
 
 
-@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.2.8", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号更新
+@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.2.9", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号更新
 class ToolCallNotifierPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -343,16 +343,16 @@ class ToolCallNotifierPlugin(Star):
     def _create_media_segment(self, path_or_url: str):
         is_url = path_or_url.lower().startswith('http:') or path_or_url.lower().startswith('https:')
         if any(path_or_url.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif']):
-            plugin_logger.info(f"媒体处理：识别为图片: {path_or_url}")
+            plugin_logger.debug(f"媒体处理：识别为图片: {path_or_url}")
             return Comp.Image.fromURL(path_or_url) if is_url else Comp.Image.fromFileSystem(path_or_url)
         if any(path_or_url.lower().endswith(ext) for ext in ['.mp4', '.mov', '.avi']):
-            plugin_logger.info(f"媒体处理：识别为视频: {path_or_url}")
+            plugin_logger.debug(f"媒体处理：识别为视频: {path_or_url}")
             return Comp.Video.fromURL(path_or_url) if is_url else Comp.Video.fromFileSystem(path_or_url)
         if path_or_url.lower().endswith('.wav'):
-            plugin_logger.info(f"媒体处理：识别为音频: {path_or_url}")
+            plugin_logger.debug(f"媒体处理：识别为音频: {path_or_url}")
             return Comp.Record(url=path_or_url) if is_url else Comp.Record(file=path_or_url)
         if any(path_or_url.lower().endswith(ext) for ext in ['.pdf', '.doc', '.docx', '.txt']):
-            plugin_logger.info(f"媒体处理：识别为文档: {path_or_url}")
+            plugin_logger.debug(f"媒体处理：识别为文档: {path_or_url}")
             return Comp.File(url=path_or_url, name=os.path.basename(path_or_url)) if is_url else Comp.File(file=path_or_url, name=os.path.basename(path_or_url))
         plugin_logger.debug(f"媒体处理：路径 '{path_or_url}' 未匹配任何已知媒体类型，将作为纯文本处理。")
         return Comp.Plain(text=path_or_url)
@@ -363,9 +363,9 @@ class ToolCallNotifierPlugin(Star):
         multimodal_processing_enabled = self.config.get("enable_multimodal_processing", False)
 
         if multimodal_processing_enabled:
-            plugin_logger.info("多模态处理已启用。将尝试处理引用消息中的图片。")
+            plugin_logger.info("多模态处理已启用。")
         else:
-            plugin_logger.info("多模态处理已禁用。所有引用媒体将转换为文本描述。")
+            plugin_logger.info("多模态处理已禁用。")
 
         for seg_idx, seg_data in enumerate(replied_message_segments):
             seg_type = seg_data.get('type')
@@ -385,7 +385,7 @@ class ToolCallNotifierPlugin(Star):
                         mime_type = get_mime_type(downloaded_file) or "image/jpeg"
                         base64_data = file_to_base64(downloaded_file)
                         if base64_data:
-                            plugin_logger.info(f"多模态启用：准备图片 part (data URI) for {media_url}")
+                            plugin_logger.debug(f"多模态启用：准备图片 part (data URI) for {media_url}")
                             parts.append({
                                 "type": "image_url",
                                 "image_url": {"url": f"data:{mime_type};base64,{base64_data}"}
@@ -421,13 +421,19 @@ class ToolCallNotifierPlugin(Star):
                     reply_message_id_str = str(segment.data['id'])
                 elif hasattr(segment, 'id'):
                     reply_message_id_str = str(segment.id)
+                
+                # 仅当成功解析出 reply_message_id_str 时才记录检测到引用
                 if reply_message_id_str:
-                    plugin_logger.info(f"LLM请求预处理：检测到QQ引用消息，ID: {reply_message_id_str}")
-                else:
+                    plugin_logger.debug(f"LLM请求预处理：检测到QQ引用消息，ID: {reply_message_id_str}")
+                else: # 如果 segment 是 Reply 但没有有效 id
                     plugin_logger.warning(f"LLM请求预处理：找到Reply段，但无法确定其message_id。段内容: {segment}")
-                break
-        if not reply_message_id_str:
+                break # 无论是否成功解析id，只要是Reply段就跳出循环
+
+        if not reply_message_id_str: # 如果没有引用，则正常返回
             return
+
+        # 后续逻辑仅在检测到有效引用ID时执行
+        plugin_logger.info(f"LLM请求预处理：处理引用消息 ID: {reply_message_id_str}")
 
         try:
             client = None
@@ -443,11 +449,11 @@ class ToolCallNotifierPlugin(Star):
                 plugin_logger.error("LLM请求预处理：无法获取到 aiocqhttp 客户端实例。")
                 return
 
-            plugin_logger.info(f"LLM请求预处理：尝试获取被引用消息详情，ID: {reply_message_id_str}")
+            # plugin_logger.info(f"LLM请求预处理：尝试获取被引用消息详情，ID: {reply_message_id_str}") # 此日志有些冗余，上面已有处理引用的日志
             replied_message_detail = await client.api.call_action('get_msg', message_id=int(reply_message_id_str))
             
             if isinstance(replied_message_detail, dict) and 'message_id' in replied_message_detail and 'message' in replied_message_detail:
-                plugin_logger.info(f"LLM请求预处理：成功获取被引用消息详情。")
+                plugin_logger.debug(f"LLM请求预处理：成功获取被引用消息详情。")
                 original_sender_nickname = replied_message_detail.get('sender', {}).get('card') or replied_message_detail.get('sender', {}).get('nickname', '未知用户')
                 replied_segments = replied_message_detail.get('message', [])
                 if not isinstance(replied_segments, list): replied_segments = []
@@ -531,16 +537,17 @@ class ToolCallNotifierPlugin(Star):
                         new_contexts.extend(req.contexts) 
                         new_contexts.extend(actual_quoted_contexts) 
 
-                        if req.prompt and req.prompt.strip():
-                            is_prompt_already_in_contexts = False
-                            if new_contexts and new_contexts[-1].get('role') == 'user' and new_contexts[-1].get('content') == req.prompt:
-                                is_prompt_already_in_contexts = True
-                            if not is_prompt_already_in_contexts:
-                                new_contexts.append({"role": "user", "content": req.prompt})
+                        # 移除插件对 req.prompt 的直接添加，依赖 AstrBot 核心处理用户当前回复
+                        # if req.prompt and req.prompt.strip():
+                        #     is_prompt_already_in_contexts = False
+                        #     if new_contexts and new_contexts[-1].get('role') == 'user' and new_contexts[-1].get('content') == req.prompt:
+                        #         is_prompt_already_in_contexts = True
+                        #     if not is_prompt_already_in_contexts:
+                        #         new_contexts.append({"role": "user", "content": req.prompt})
                         
                         req.contexts = new_contexts
-                        # req.prompt = " " # 尝试移除此行，让AstrBot核心处理prompt和contexts的最终整合
-                        plugin_logger.info(f"LLM请求预处理：已整合引用内容到 contexts。原始 req.prompt 保留（如果 AstrBot 会自动处理）。")
+                        # req.prompt = " " # 保持此行注释，让 AstrBot 核心使用原始 req.prompt
+                        plugin_logger.info(f"LLM请求预处理：已整合引用内容到 contexts。用户当前回复将由 AstrBot 核心处理。")
                         plugin_logger.debug(f"LLM请求预处理：新的 contexts: {req.contexts}")
                     else:
                         plugin_logger.info("LLM请求预处理：未构建有效的引用上下文条目。")
