@@ -17,16 +17,18 @@ from .utils import (
     get_mime_type,
     file_to_base64,
     cleanup_temp_files,
-    plugin_logger
+    plugin_logger,
+    call_gemini_api # 新增导入
 )
 
 
-@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.2.6", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号由用户管理
+@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.2.7", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号由用户管理
 class ToolCallNotifierPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
         self.temp_media_dir = None
+        self._cleanup_task = None # 用于存储定时清理任务的引用
 
         log_level_str = self.config.get("log_level", "INFO").upper()
         plugin_logger.setLevel(log_level_str)
@@ -48,12 +50,18 @@ class ToolCallNotifierPlugin(Star):
             
             if self.temp_media_dir:
                 plugin_logger.info(f"临时媒体目录已初始化: {self.temp_media_dir.resolve()}")
-                cleanup_minutes = self.config.get("temp_file_cleanup_minutes", 60)
-                if cleanup_minutes > 0:
-                    plugin_logger.info(f"插件初始化：执行临时文件清理，目录: {self.temp_media_dir}, 清理周期: {cleanup_minutes} 分钟。")
-                    cleanup_temp_files(self.temp_media_dir, cleanup_minutes)
+                # 启动时执行一次清理
+                initial_cleanup_minutes = self.config.get("temp_file_cleanup_minutes", 60)
+                if initial_cleanup_minutes > 0:
+                    plugin_logger.info(f"插件初始化：执行一次性临时文件清理，目录: {self.temp_media_dir}, 清理周期: {initial_cleanup_minutes} 分钟。")
+                    cleanup_temp_files(self.temp_media_dir, initial_cleanup_minutes)
+                
+                # 启动定时清理任务
+                if initial_cleanup_minutes > 0:
+                    self._cleanup_task = asyncio.create_task(self._periodic_cleanup_task(initial_cleanup_minutes))
+                    plugin_logger.info(f"已启动定时清理任务，每 {initial_cleanup_minutes} 分钟执行一次。")
                 else:
-                    plugin_logger.info("插件初始化：临时文件自动清理已禁用 (周期设置为0或更小)。")
+                    plugin_logger.info("插件初始化：定时临时文件自动清理已禁用 (周期设置为0或更小)。")
             else:
                 plugin_logger.error(f"临时媒体目录未能成功初始化于: {base_data_path}")
         except Exception as e:
@@ -62,7 +70,182 @@ class ToolCallNotifierPlugin(Star):
 
         self.url_pattern = re.compile(r'(?:https?:)?//[^\s"\'`<>()[\]{}]+')
         self.path_pattern = re.compile(r'(?:[a-zA-Z]:\\|/)[^\s"\'`<>`()[\]{}]+')
+        
+        # 为 Gemini 工具读取配置
+        self.gemini_api_key = self.config.get("gemini_api_key", None)
+        self.gemini_model_name_for_media = self.config.get("gemini_model_name_for_media", "gemini-2.0-flash-exp") # 默认模型已改回
+        self.gemini_base_url = self.config.get("gemini_base_url", "https://generativelanguage.googleapis.com").rstrip('/') # 新增基础URL配置
+        
+        if not self.gemini_api_key:
+            plugin_logger.warning("Gemini API Key 未在插件配置中设置。understand_media_from_reply 工具将无法工作。")
+        if not self.gemini_base_url:
+            plugin_logger.warning("Gemini Base URL 未在插件配置中设置。understand_media_from_reply 工具将使用默认值或可能失败。")
+
+
         plugin_logger.info(f"插件 '{self.metadata.name if hasattr(self, 'metadata') else 'ToolCallNotifierPlugin'}' 初始化完成。")
+
+    async def _periodic_cleanup_task(self, cleanup_interval_minutes: int):
+        """定期清理临时文件的后台任务"""
+        if not self.temp_media_dir or cleanup_interval_minutes <= 0:
+            plugin_logger.info("定时清理任务：临时目录无效或清理周期不合法，任务不执行。")
+            return
+        
+        wait_seconds = cleanup_interval_minutes * 60
+        plugin_logger.info(f"定时清理任务已启动，每 {cleanup_interval_minutes} 分钟 (即 {wait_seconds} 秒) 清理一次目录: {self.temp_media_dir}")
+        while True:
+            try:
+                await asyncio.sleep(wait_seconds)
+                plugin_logger.info(f"定时清理任务：开始执行临时文件清理。")
+                cleanup_temp_files(self.temp_media_dir, cleanup_interval_minutes) # 使用相同的间隔作为最大年龄
+            except asyncio.CancelledError:
+                plugin_logger.info("定时清理任务已被取消。")
+                break
+            except Exception as e:
+                plugin_logger.error(f"定时清理任务在执行过程中发生错误: {e}", exc_info=True)
+                # 发生错误后，可以考虑是继续尝试还是终止任务
+                # 为了简单起见，这里继续尝试，但可以添加错误计数和退出逻辑
+                await asyncio.sleep(60) # 发生错误后等待1分钟再试，避免快速连续失败
+
+    @filter.llm_tool(name="understand_media_from_reply")
+    async def understand_media_from_reply(self, event: AstrMessageEvent, user_instruction: str) -> typing.AsyncGenerator[Comp.BaseMessageComponent, None]:
+        """
+        通过 Gemini API 理解引用消息中的视频或语音文件内容。
+        重要：此工具仅在用户回复了一条包含单个视频或语音的消息时才能被调用。
+        如果引用的消息不符合条件，或者媒体处理失败，将返回错误信息。
+
+        Args:
+            user_instruction (str): 对 Gemini 模型的指示，例如“总结这个视频”或“转录这段语音的主要内容”。
+        """
+        plugin_logger.info(f"LLM工具 'understand_media_from_reply' 被调用，指令: {user_instruction}")
+
+        if not self.gemini_api_key:
+            plugin_logger.error("understand_media_from_reply: Gemini API Key 未配置。")
+            yield event.plain_result("错误：Gemini API Key 未配置，无法处理媒体文件。")
+            return
+
+        if not self.temp_media_dir:
+            plugin_logger.error("understand_media_from_reply: 临时媒体目录未初始化。")
+            yield event.plain_result("错误：插件临时目录未正确初始化，无法处理媒体文件。")
+            return
+
+        if event.get_platform_name() != "aiocqhttp":
+            yield event.plain_result("错误：此工具目前仅支持 QQ 平台（aiocqhttp）。")
+            return
+
+        raw_message_chain = event.message_obj.message
+        reply_message_id_str = None
+        for segment in raw_message_chain:
+            if isinstance(segment, Comp.Reply):
+                reply_message_id_str = str(segment.data.get('id')) if hasattr(segment, 'data') and isinstance(segment.data, dict) else str(getattr(segment, 'id', None))
+                break
+        
+        if not reply_message_id_str:
+            yield event.plain_result("错误：此工具需要引用一条消息才能工作。")
+            return
+
+        try:
+            client = None
+            if isinstance(event, AiocqhttpMessageEvent):
+                client = event.bot
+            else: # 尝试从 context 获取
+                platform_adapter = self.context.get_platform(filter.PlatformAdapterType.AIOCQHTTP)
+                if platform_adapter: client = getattr(platform_adapter, 'client', getattr(platform_adapter, 'get_client', lambda: None)())
+
+            if not client:
+                plugin_logger.error("understand_media_from_reply: 无法获取 aiocqhttp 客户端。")
+                yield event.plain_result("错误：无法连接到 QQ 平台，请检查插件或 AstrBot 配置。")
+                return
+
+            replied_message_detail = await client.api.call_action('get_msg', message_id=int(reply_message_id_str))
+            
+            if not (isinstance(replied_message_detail, dict) and 'message' in replied_message_detail):
+                plugin_logger.warning(f"understand_media_from_reply: 获取引用消息详情失败或格式不符。ID: {reply_message_id_str}")
+                yield event.plain_result("错误：无法获取被引用的消息详情。")
+                return
+
+            replied_segments = replied_message_detail.get('message', [])
+            media_url = None
+            media_type_for_gemini = None # "video/mp4" or "audio/mp3"
+
+            for seg in replied_segments:
+                seg_type = seg.get('type')
+                seg_data = seg.get('data', {})
+                url = seg_data.get('url')
+                file_ext = Path(url).suffix.lower() if url else ""
+
+                if seg_type == 'video' and url:
+                    media_url = url
+                    media_type_for_gemini = "video/mp4"
+                    plugin_logger.info(f"understand_media_from_reply: 在引用消息中找到视频: {media_url}")
+                    break 
+                elif seg_type == 'record' and url:
+                    media_url = url
+                    # Gemini 可能更喜欢 mp3 或其他常见音频格式，但这里我们先用 mp3 作为目标
+                    # 实际的 MIME 类型应由 get_mime_type 确定，或根据需要进行转换
+                    media_type_for_gemini = "audio/mp3" # 假设是mp3，如果原始是silk等需要转换
+                    plugin_logger.info(f"understand_media_from_reply: 在引用消息中找到语音: {media_url}")
+                    break
+
+            if not media_url or not media_type_for_gemini:
+                yield event.plain_result("错误：引用的消息中未找到支持的视频或语音文件，或者文件URL无效。")
+                return
+
+            downloaded_file_path = await download_media(media_url, self.temp_media_dir, "gemini_media_")
+            if not downloaded_file_path:
+                plugin_logger.error(f"understand_media_from_reply: 下载媒体文件失败: {media_url}")
+                yield event.plain_result(f"错误：无法下载引用的媒体文件: {media_url}")
+                return
+
+            # 对于语音，如果原始格式不是mp3 (例如 .silk, .amr)，理想情况下这里应该有转换步骤
+            # 目前假设下载的文件可以直接使用，或者 Gemini 支持其原始MIME类型
+            actual_mime_type = get_mime_type(downloaded_file_path)
+            if media_type_for_gemini == "audio/mp3" and actual_mime_type and "audio" in actual_mime_type:
+                 # 如果是音频，使用实际检测到的MIME类型，除非它是非常规的且Gemini不支持
+                 # 这里简化处理，如果下载的是常见音频，直接用其MIME，否则坚持audio/mp3并期望Gemini能处理
+                 if actual_mime_type not in ["audio/mpeg", "audio/mp3", "audio/wav", "audio/ogg", "audio/flac", "audio/aac"]: # 常见类型
+                     plugin_logger.warning(f"understand_media_from_reply: 下载的语音文件MIME类型为 {actual_mime_type}，将尝试作为 audio/mp3 发送给Gemini。")
+                 else:
+                     media_type_for_gemini = actual_mime_type # 使用更准确的MIME类型
+            elif not actual_mime_type: # 如果无法检测MIME
+                 plugin_logger.warning(f"understand_media_from_reply: 无法检测下载文件的MIME类型: {downloaded_file_path}。将使用预设的 {media_type_for_gemini}")
+
+
+            base64_content = file_to_base64(downloaded_file_path)
+            if not base64_content:
+                plugin_logger.error(f"understand_media_from_reply: 文件转 Base64 失败: {downloaded_file_path}")
+                yield event.plain_result("错误：无法处理下载的媒体文件（Base64编码失败）。")
+                return
+            
+            # 调用 Gemini API
+            gemini_model = self.gemini_model_name_for_media
+            plugin_logger.info(f"understand_media_from_reply: 使用模型 '{gemini_model}' 调用 Gemini API。")
+            
+            api_response_text = await call_gemini_api(
+                base_url=self.gemini_base_url,
+                api_key=self.gemini_api_key,
+                model_name=gemini_model,
+                mime_type=media_type_for_gemini, # 使用选择或检测到的MIME
+                base64_data=base64_content,
+                user_prompt=user_instruction
+            )
+
+            if api_response_text:
+                yield event.plain_result(api_response_text)
+            else:
+                yield event.plain_result("错误：调用 Gemini API 理解媒体失败，或未返回有效文本。")
+
+        except Exception as e:
+            plugin_logger.error(f"understand_media_from_reply: 处理过程中发生错误: {e}", exc_info=True)
+            yield event.plain_result(f"处理引用媒体时发生内部错误: {str(e)}")
+        finally:
+            # 可以在这里添加临时文件清理逻辑，如果downloaded_file_path存在
+            if 'downloaded_file_path' in locals() and downloaded_file_path and downloaded_file_path.exists():
+                try:
+                    downloaded_file_path.unlink()
+                    plugin_logger.debug(f"understand_media_from_reply: 已清理临时文件 {downloaded_file_path}")
+                except Exception as e_clean:
+                    plugin_logger.error(f"understand_media_from_reply: 清理临时文件失败 {downloaded_file_path}: {e_clean}")
+
 
     @filter.on_llm_response(priority=1)
     async def on_llm_response_handler(self, event: AstrMessageEvent, resp: LLMResponse):
@@ -190,7 +373,9 @@ class ToolCallNotifierPlugin(Star):
                                 "type": "image_url",
                                 "image_url": {"url": f"data:{mime_type};base64,{base64_data}"}
                             })
-                            plugin_logger.debug(f"图片 part (original_url: {media_url}) 已准备，将发送给LLM的结构: {parts[-1]}")
+                            # 同时添加原始 URL 作为文本
+                            parts.append({"type": "text", "text": f"[引用的图片{seg_idx+1} URL: {media_url}]"})
+                            plugin_logger.debug(f"图片 part (original_url: {media_url}) 已准备，将发送给LLM的结构: {parts[-2:]}")
                         else:
                             parts.append({"type": "text", "text": f"[引用的图片{seg_idx+1}，Base64编码失败，URL: {media_url}]"})
                     else:
@@ -206,10 +391,7 @@ class ToolCallNotifierPlugin(Star):
     @filter.on_llm_request(priority=1)
     async def on_llm_request_handler(self, event: AstrMessageEvent, req: ProviderRequest):
         """LLM请求前处理：处理引用消息中的媒体，注入上下文。"""
-        if self.temp_media_dir:
-            cleanup_minutes = self.config.get("temp_file_cleanup_minutes", 60)
-            if cleanup_minutes > 0:
-                cleanup_temp_files(self.temp_media_dir, cleanup_minutes)
+        # 从此处移除了 cleanup_temp_files 的调用，将改为定时任务
 
         if event.get_platform_name() != "aiocqhttp":
             return
@@ -403,11 +585,24 @@ class ToolCallNotifierPlugin(Star):
 
     async def terminate(self):
         plugin_logger.info(f"插件 '{self.metadata.name if hasattr(self, 'metadata') else 'ToolCallNotifierPlugin'}' 正在终止...")
+
+        # 取消定时清理任务
+        if self._cleanup_task and not self._cleanup_task.done():
+            plugin_logger.info("正在取消定时清理任务...")
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task # 等待任务实际取消
+            except asyncio.CancelledError:
+                plugin_logger.info("定时清理任务已成功取消。")
+            except Exception as e:
+                plugin_logger.error(f"等待定时清理任务取消时发生错误: {e}", exc_info=True)
+        
+        # 执行最后一次清理
         if self.temp_media_dir:
             cleanup_minutes = self.config.get("temp_file_cleanup_minutes", 60)
-            if cleanup_minutes > 0:
+            if cleanup_minutes > 0: # 即使定时任务禁用了，这里也根据配置决定是否做最后清理
                 plugin_logger.info(f"插件终止：执行最终临时文件清理，目录: {self.temp_media_dir}, 清理周期: {cleanup_minutes} 分钟。")
                 cleanup_temp_files(self.temp_media_dir, cleanup_minutes) 
             else:
-                 plugin_logger.info("插件终止：临时文件自动清理已禁用。")
+                 plugin_logger.info("插件终止：最终临时文件清理已禁用 (周期设置为0或更小)。")
         plugin_logger.info(f"插件 '{self.metadata.name if hasattr(self, 'metadata') else 'ToolCallNotifierPlugin'}' 已终止。")

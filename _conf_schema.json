@@ -16,5 +16,23 @@
     "default": "INFO",
     "options": ["DEBUG", "INFO", "WARNING", "ERROR"],
     "hint": "用于控制插件输出日志的详细程度。"
+  },
+  "gemini_api_key": {
+    "description": "您的 Google Gemini API 密钥。",
+    "type": "string",
+    "default": "",
+    "hint": "请在此处填写您的 Gemini API Key，用于 understand_media_from_reply 工具。"
+  },
+  "gemini_model_name_for_media": {
+    "description": "用于处理视频/语音媒体文件的 Gemini 模型名称。",
+    "type": "string",
+    "default": "gemini-2.0-flash-exp",
+    "hint": "例如：gemini-2.0-flash-exp, gemini-1.5-flash-latest 等。"
+  },
+  "gemini_base_url": {
+    "description": "Gemini API 的基础端点 URL。",
+    "type": "string",
+    "default": "https://generativelanguage.googleapis.com",
+    "hint": "如果使用代理或自定义端点，请在此处填写。"
   }
 }

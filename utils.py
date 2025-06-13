@@ -173,6 +173,98 @@ def cleanup_temp_files(temp_dir: Path, max_age_minutes: int):
 # 用于解析 Content-Disposition 和 URL 路径的额外导入
 import re
 import urllib.parse
+import json # 新增导入
+
+async def call_gemini_api(base_url: str, api_key: str, model_name: str, mime_type: str, base64_data: str, user_prompt: str) -> str | None:
+    """
+    调用 Gemini API 来处理媒体文件。
+
+    Args:
+        base_url: Gemini API 的基础端点。
+        api_key: Gemini API 密钥。
+        model_name: 要使用的 Gemini 模型名称。
+        mime_type: 媒体文件的 MIME 类型 (例如 "video/mp4", "audio/mp3")。
+        base64_data: 媒体文件的 Base64 编码数据。
+        user_prompt: 用户提供的提示，指导模型如何理解媒体。
+
+    Returns:
+        从 Gemini API 返回的文本响应，如果失败则返回 None。
+    """
+    if not api_key:
+        plugin_logger.error("Gemini API 调用失败：API Key 未配置。")
+        return None
+    
+    if not base_url:
+        plugin_logger.error("Gemini API 调用失败：Base URL 未配置。")
+        return "错误：Gemini API 基础端点未配置。"
+
+
+    # 确保 base_url 末尾没有斜杠，而路径开头有斜杠
+    clean_base_url = base_url.rstrip('/')
+    api_path = f"/v1beta/models/{model_name}:generateContent"
+    api_url = f"{clean_base_url}{api_path}?key={api_key}"
+    
+    request_payload = {
+        "contents": [{
+            "parts": [
+                {
+                    "inline_data": {
+                        "mime_type": mime_type,
+                        "data": base64_data
+                    }
+                },
+                {"text": user_prompt}
+            ]
+        }]
+    }
+
+    plugin_logger.info(f"向 Gemini API ({model_name}) 发送请求...")
+    plugin_logger.debug(f"Gemini API 请求体 (数据部分已省略): {json.dumps({'contents': [{'parts': [{'inline_data': {'mime_type': mime_type, 'data': '...'}}, {'text': user_prompt}]}]})}")
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(api_url, json=request_payload) as response:
+                response_json = await response.json()
+                if response.status == 200:
+                    plugin_logger.info("Gemini API 请求成功。")
+                    # 提取文本内容，根据 Gemini API 的响应结构
+                    # 通常在 response_json['candidates'][0]['content']['parts'][0]['text']
+                    candidates = response_json.get("candidates")
+                    if candidates and isinstance(candidates, list) and len(candidates) > 0:
+                        content = candidates[0].get("content")
+                        if content and isinstance(content, dict):
+                            parts = content.get("parts")
+                            if parts and isinstance(parts, list) and len(parts) > 0:
+                                text_response = parts[0].get("text")
+                                if text_response:
+                                    plugin_logger.debug(f"Gemini API 响应文本: {text_response}")
+                                    return str(text_response)
+                                else:
+                                    plugin_logger.warning("Gemini API 响应中未找到预期的文本内容 (parts[0]['text']缺失)。")
+                            else:
+                                plugin_logger.warning("Gemini API 响应中未找到预期的 'parts' 列表。")
+                        else:
+                            plugin_logger.warning("Gemini API 响应中未找到预期的 'content' 对象。")
+                    else:
+                        plugin_logger.warning("Gemini API 响应中未找到预期的 'candidates' 列表。")
+                    
+                    plugin_logger.warning(f"Gemini API 响应结构不符合预期，完整响应: {response_json}")
+                    return f"Gemini API 调用成功，但无法解析响应文本。原始响应: {json.dumps(response_json)}"
+
+                else:
+                    plugin_logger.error(f"Gemini API 请求失败，状态码: {response.status}, 响应: {response_json}")
+                    error_message = response_json.get("error", {}).get("message", "未知错误")
+                    return f"Gemini API 错误: {error_message}"
+    except aiohttp.ClientError as e:
+        plugin_logger.error(f"调用 Gemini API 时发生 aiohttp 客户端错误: {e}", exc_info=True)
+        return f"Gemini API 网络请求错误: {e}"
+    except json.JSONDecodeError as e:
+        plugin_logger.error(f"解析 Gemini API 响应时发生 JSON 解码错误: {e}", exc_info=True)
+        raw_text = await response.text()
+        return f"Gemini API 响应 JSON 解析错误。原始响应: {raw_text}"
+    except Exception as e:
+        plugin_logger.error(f"调用 Gemini API 时发生未知错误: {e}", exc_info=True)
+        return f"调用 Gemini API 时发生未知错误: {e}"
 
 if __name__ == '__main__':
     pass
