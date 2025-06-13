@@ -22,7 +22,7 @@ from .utils import (
 )
 
 
-@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.2.9", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号更新
+@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.3.2", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号更新
 class ToolCallNotifierPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -536,15 +536,6 @@ class ToolCallNotifierPlugin(Star):
                         if system_prompt_entry: new_contexts.append(system_prompt_entry)
                         new_contexts.extend(req.contexts) 
                         new_contexts.extend(actual_quoted_contexts) 
-
-                        # 移除插件对 req.prompt 的直接添加，依赖 AstrBot 核心处理用户当前回复
-                        # if req.prompt and req.prompt.strip():
-                        #     is_prompt_already_in_contexts = False
-                        #     if new_contexts and new_contexts[-1].get('role') == 'user' and new_contexts[-1].get('content') == req.prompt:
-                        #         is_prompt_already_in_contexts = True
-                        #     if not is_prompt_already_in_contexts:
-                        #         new_contexts.append({"role": "user", "content": req.prompt})
-                        
                         req.contexts = new_contexts
                         # req.prompt = " " # 保持此行注释，让 AstrBot 核心使用原始 req.prompt
                         plugin_logger.info(f"LLM请求预处理：已整合引用内容到 contexts。用户当前回复将由 AstrBot 核心处理。")
