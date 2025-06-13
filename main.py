@@ -22,7 +22,7 @@ from .utils import (
 )
 
 
-@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.2.7", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号更新
+@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.2.8", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号更新
 class ToolCallNotifierPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -107,16 +107,16 @@ class ToolCallNotifierPlugin(Star):
                 await asyncio.sleep(60) # 发生错误后等待1分钟再试，避免快速连续失败
 
     @filter.llm_tool(name="understand_media_from_reply")
-    async def understand_media_from_reply(self, event: AstrMessageEvent, user_instruction: str) -> typing.AsyncGenerator[Comp.BaseMessageComponent, None]:
+    async def understand_media_from_reply(self, event: AstrMessageEvent, prompt: str) -> typing.AsyncGenerator[Comp.BaseMessageComponent, None]:
         """
         通过 Gemini API 理解引用消息中的视频或语音文件内容。
         重要：此工具仅在用户回复了一条包含单个视频或语音的消息时才能被调用。
         如果引用的消息不符合条件，或者媒体处理失败，将返回错误信息。
 
         Args:
-            user_instruction (string): 对 Gemini 模型的指示，例如“总结这个视频”或“转录这段语音的主要内容”。
+            prompt (string): 对 Gemini 模型的指示，例如“总结这个视频”或“转录这段语音的主要内容”，应根据用户意图生成此提示。
         """
-        plugin_logger.info(f"LLM工具 'understand_media_from_reply' 被调用，指令: {user_instruction}")
+        plugin_logger.info(f"LLM工具 'understand_media_from_reply' 被调用，提示: {prompt}")
 
         if not self.gemini_api_key:
             plugin_logger.error("understand_media_from_reply: Gemini API Key 未配置。")
@@ -196,6 +196,23 @@ class ToolCallNotifierPlugin(Star):
                 yield event.plain_result(f"错误：无法下载引用的媒体文件: {media_url}")
                 return
 
+            # 检查文件大小
+            try:
+                file_size = downloaded_file_path.stat().st_size
+                max_size_bytes = 20 * 1024 * 1024  # 20MB
+                if file_size > max_size_bytes:
+                    plugin_logger.warning(f"understand_media_from_reply: 文件 {downloaded_file_path} 过大 ({file_size} bytes > {max_size_bytes} bytes)。")
+                    yield event.plain_result(f"错误：引用的媒体文件大小超过20MB限制，无法处理。")
+                    if downloaded_file_path.exists(): # 清理已下载的大文件
+                        downloaded_file_path.unlink()
+                    return
+            except Exception as e_stat:
+                plugin_logger.error(f"understand_media_from_reply: 检查文件大小时出错: {downloaded_file_path}, {e_stat}", exc_info=True)
+                yield event.plain_result("错误：检查媒体文件大小时发生内部错误。")
+                if downloaded_file_path.exists(): # 清理
+                    downloaded_file_path.unlink()
+                return
+
             # 对于语音，如果原始格式不是mp3 (例如 .silk, .amr)，理想情况下这里应该有转换步骤
             # 目前假设下载的文件可以直接使用，或者 Gemini 支持其原始MIME类型
             actual_mime_type = get_mime_type(downloaded_file_path)
@@ -226,7 +243,7 @@ class ToolCallNotifierPlugin(Star):
                 model_name=gemini_model,
                 mime_type=media_type_for_gemini, # 使用选择或检测到的MIME
                 base64_data=base64_content,
-                user_prompt=user_instruction
+                user_prompt=prompt
             )
 
             if api_response_text:
@@ -522,8 +539,8 @@ class ToolCallNotifierPlugin(Star):
                                 new_contexts.append({"role": "user", "content": req.prompt})
                         
                         req.contexts = new_contexts
-                        req.prompt = " " 
-                        plugin_logger.info(f"LLM请求预处理：已整合引用内容到 contexts。")
+                        # req.prompt = " " # 尝试移除此行，让AstrBot核心处理prompt和contexts的最终整合
+                        plugin_logger.info(f"LLM请求预处理：已整合引用内容到 contexts。原始 req.prompt 保留（如果 AstrBot 会自动处理）。")
                         plugin_logger.debug(f"LLM请求预处理：新的 contexts: {req.contexts}")
                     else:
                         plugin_logger.info("LLM请求预处理：未构建有效的引用上下文条目。")
