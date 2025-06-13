@@ -22,7 +22,7 @@ from .utils import (
 )
 
 
-@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.2.7", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号由用户管理
+@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.2.7", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号更新
 class ToolCallNotifierPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -114,7 +114,7 @@ class ToolCallNotifierPlugin(Star):
         如果引用的消息不符合条件，或者媒体处理失败，将返回错误信息。
 
         Args:
-            user_instruction (str): 对 Gemini 模型的指示，例如“总结这个视频”或“转录这段语音的主要内容”。
+            user_instruction (string): 对 Gemini 模型的指示，例如“总结这个视频”或“转录这段语音的主要内容”。
         """
         plugin_logger.info(f"LLM工具 'understand_media_from_reply' 被调用，指令: {user_instruction}")
 
