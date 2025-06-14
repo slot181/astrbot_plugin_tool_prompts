@@ -99,6 +99,11 @@ class ToolCallNotifierPlugin(Star):
 
     @filter.llm_tool(name="understand_media_from_reply")
     async def understand_media_from_reply(self, event: AstrMessageEvent, prompt: str) -> typing.AsyncGenerator[Comp.BaseMessageComponent, None]:
+        '''理解引用消息中的媒体文件（视频或语音）并根据用户提示进行回应。
+        
+        Args:
+            prompt(string): 用户提供的关于如何理解或回应媒体内容的提示。
+        '''
         plugin_logger.info(f"LLM工具 'understand_media_from_reply' 被调用，提示: {prompt}")
 
         if not self.gemini_api_key:
