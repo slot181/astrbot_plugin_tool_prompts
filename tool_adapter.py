@@ -23,86 +23,90 @@ async def process_tool_response_from_history(plugin_instance: Star, event: AstrM
     如果找到，则提取 answerText 并单独发送。
     """
     try:
-        if not hasattr(plugin_instance, 'processed_tool_call_ids'):
-            plugin_logger.warning("ToolAdapter: 'processed_tool_call_ids' not found on plugin instance. Skipping.")
-            return
+        plugin_logger.info("工具适配器：process_tool_response_from_history 函数开始执行。")
 
-        # 获取当前会话的上下文历史
-        # self.context is plugin_instance.context
-        conversation_manager = plugin_instance.context.conversation_manager
-        
-        # event.unified_msg_origin 是会话的唯一标识
-        current_conversation_id = await conversation_manager.get_curr_conversation_id(event.unified_msg_origin)
-        if not current_conversation_id:
-            plugin_logger.debug("ToolAdapter: No current conversation ID found. Skipping.")
+        if not hasattr(plugin_instance, 'processed_tool_call_ids'):
+            plugin_logger.warning("工具适配器：插件实例上未找到 'processed_tool_call_ids' 属性。跳过处理。")
             return
+        plugin_logger.debug(f"工具适配器：已处理的 tool_call_ids 集合: {plugin_instance.processed_tool_call_ids}")
+
+        conversation_manager = plugin_instance.context.conversation_manager
+        current_conversation_id = await conversation_manager.get_curr_conversation_id(event.unified_msg_origin)
+        
+        if not current_conversation_id:
+            plugin_logger.info("工具适配器：未找到当前会话ID。跳过处理。")
+            return
+        plugin_logger.info(f"工具适配器：当前会话ID为: {current_conversation_id}")
 
         conversation = await conversation_manager.get_conversation(event.unified_msg_origin, current_conversation_id)
         if not conversation or not conversation.history:
-            plugin_logger.debug("ToolAdapter: No conversation history found. Skipping.")
+            plugin_logger.info("工具适配器：未找到会话或会话历史为空。跳过处理。")
             return
+        plugin_logger.debug(f"工具适配器：获取到会话历史的前200字符: {conversation.history[:200]}...")
 
         history_list = []
         try:
             history_list = json.loads(conversation.history)
             if not isinstance(history_list, list):
-                plugin_logger.warning(f"ToolAdapter: Conversation history is not a list. History: {conversation.history}")
+                plugin_logger.warning(f"工具适配器：会话历史不是一个列表。实际类型为: {type(history_list)}。历史内容: {conversation.history}")
                 return
         except json.JSONDecodeError:
-            plugin_logger.error(f"ToolAdapter: Failed to parse conversation history JSON. History: {conversation.history}")
+            plugin_logger.error(f"工具适配器：解析会话历史JSON失败。历史内容: {conversation.history}", exc_info=True)
             return
         
-        # 从后向前遍历历史记录，查找最新的未处理的目标工具响应
-        for message_entry in reversed(history_list):
+        plugin_logger.info(f"工具适配器：成功解析会话历史，共 {len(history_list)} 条记录。开始反向遍历。")
+        
+        found_and_processed_new = False
+        for i, message_entry in enumerate(reversed(history_list)):
+            plugin_logger.debug(f"工具适配器：检查历史记录条目索引 {len(history_list) - 1 - i}: {message_entry}")
             if isinstance(message_entry, dict) and \
                message_entry.get("role") == "tool" and \
                "tool_call_id" in message_entry and \
                "content" in message_entry:
                 
                 tool_call_id = message_entry.get("tool_call_id")
+                plugin_logger.info(f"工具适配器：找到 role='tool' 的消息，其 tool_call_id 为: {tool_call_id}")
                 
                 if tool_call_id and tool_call_id.startswith(TARGET_TOOL_CALL_ID_PREFIX):
+                    plugin_logger.info(f"工具适配器：tool_call_id '{tool_call_id}' 匹配目标前缀 '{TARGET_TOOL_CALL_ID_PREFIX}'。")
                     if tool_call_id not in plugin_instance.processed_tool_call_ids:
-                        plugin_logger.info(f"ToolAdapter: Found new tool response for '{tool_call_id}' in history.")
+                        plugin_logger.info(f"工具适配器：发现新的工具响应，ID 为: '{tool_call_id}'。")
                         
                         tool_content_str = message_entry.get("content")
                         if tool_content_str and isinstance(tool_content_str, str):
+                            plugin_logger.debug(f"工具适配器：工具响应内容 (字符串): {tool_content_str}")
                             try:
                                 tool_content_json = json.loads(tool_content_str)
                                 answer_text = tool_content_json.get("answerText")
                                 
                                 if answer_text:
-                                    plugin_logger.info(f"ToolAdapter: Extracting and sending answerText for '{tool_call_id}'.")
+                                    plugin_logger.info(f"工具适配器：成功从 '{tool_call_id}' 提取到 answerText。准备发送。")
                                     await event.send(event.plain_result(str(answer_text)))
                                     plugin_instance.processed_tool_call_ids.add(tool_call_id)
-                                    plugin_logger.info(f"ToolAdapter: answerText sent and '{tool_call_id}' marked as processed.")
-                                    # 找到了最新的未处理的，处理完就返回，避免处理更早的同名工具调用（如果逻辑是只处理最新的一个）
-                                    # 或者，如果希望一次性处理所有新的，则不在这里 return，但要注意可能的多条消息发送。
-                                    # 当前逻辑：找到最新的一个未处理的，处理并返回。
-                                    return
+                                    plugin_logger.info(f"工具适配器：answerText 已发送，'{tool_call_id}' 已标记为已处理。")
+                                    found_and_processed_new = True
+                                    break 
                                 else:
-                                    plugin_logger.warning(f"ToolAdapter: 'answerText' not found in content for '{tool_call_id}'. Content: {tool_content_str}")
+                                    plugin_logger.warning(f"工具适配器：在工具 '{tool_call_id}' 的响应内容中未找到 'answerText' 字段。内容: {tool_content_str}")
                             except json.JSONDecodeError:
-                                plugin_logger.error(f"ToolAdapter: Failed to parse tool content JSON for '{tool_call_id}'. Content: {tool_content_str}")
+                                plugin_logger.error(f"工具适配器：解析工具 '{tool_call_id}' 的响应内容JSON失败。内容: {tool_content_str}", exc_info=True)
                             except Exception as e:
-                                plugin_logger.error(f"ToolAdapter: Error processing tool content for '{tool_call_id}': {e}", exc_info=True)
+                                plugin_logger.error(f"工具适配器：处理工具 '{tool_call_id}' 响应时发生未知错误: {e}", exc_info=True)
                         else:
-                            plugin_logger.warning(f"ToolAdapter: Tool content is missing or not a string for '{tool_call_id}'.")
+                            plugin_logger.warning(f"工具适配器：工具 '{tool_call_id}' 的响应内容为空或不是字符串类型。")
                         
-                        # 即使处理失败或内容不符合预期，也标记为已处理，避免反复尝试
-                        plugin_instance.processed_tool_call_ids.add(tool_call_id)
-                        return # 处理完一个（无论成功与否）就退出，等待下一次钩子触发
+                        if not found_and_processed_new: 
+                             plugin_instance.processed_tool_call_ids.add(tool_call_id)
+                             plugin_logger.info(f"工具适配器：将 '{tool_call_id}' 标记为已处理（即使提取answerText失败或内容不符）。")
+                        break 
                     else:
-                        # plugin_logger.debug(f"ToolAdapter: Tool response for '{tool_call_id}' already processed. Skipping.")
-                        # 如果已经处理过，并且我们是从后向前找最新的，那么更早的同名工具调用也应该被处理过了（或不应再处理）
-                        # 如果只关心最新的一个，可以在这里 break 或者 return
-                        return # 假设我们只关心最新的一个未处理的，如果最新的已经被处理，则停止
-            
-            # 如果当前消息不是我们要找的 role:tool，或者不是目标工具，继续往前找
-            # 但如果这条消息是 assistant 发出的包含 tool_calls 的消息，说明工具调用刚发生，结果还没回来
-            # if isinstance(message_entry, dict) and message_entry.get("role") == "assistant" and message_entry.get("tool_calls"):
-            #     plugin_logger.debug(f"ToolAdapter: Found assistant message with tool_calls, tool results might be next. History length: {len(history_list)}")
-            #     # 通常工具结果会紧跟在 assistant 的 tool_calls 消息之后
+                        plugin_logger.info(f"工具适配器：工具响应 '{tool_call_id}' 已被处理过。停止查找更早的记录。")
+                        break 
+                else:
+                    plugin_logger.debug(f"工具适配器：tool_call_id '{tool_call_id}' 不匹配目标前缀 '{TARGET_TOOL_CALL_ID_PREFIX}'。")
+
+        if not found_and_processed_new:
+            plugin_logger.info("工具适配器：在此次检查中未找到新的、符合条件的目标工具响应进行处理。")
 
     except Exception as e:
-        plugin_logger.error(f"ToolAdapter: Error in process_tool_response_from_history: {e}", exc_info=True)
+        plugin_logger.error(f"工具适配器：在 process_tool_response_from_history 函数中发生严重错误: {e}", exc_info=True)
