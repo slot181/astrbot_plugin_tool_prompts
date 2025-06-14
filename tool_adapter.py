@@ -17,6 +17,8 @@ except ImportError:
         plugin_logger.addHandler(handler)
         plugin_logger.setLevel(logging.INFO)
 
+from .utils import store_media_in_plugin_data # 导入新的辅助函数
+
 # 目标工具ID常量化
 GEMINI_WEB_SEARCH_PREFIX = "gemini_integrator_mcp-gemini_web_search"
 SD_IMAGE_GEN_PREFIX = "sd_image_gen-generate_sd_image"
@@ -53,10 +55,20 @@ async def _handle_sd_image_gen(event: AstrMessageEvent, tool_content_str: str, t
         media_segment = None
 
         if path and os.path.exists(path):
-            plugin_logger.info(f"工具适配器：[{tool_call_id}] 使用本地路径 '{path}' 发送图片。")
-            media_segment = Comp.Image.fromFileSystem(path)
+            plugin_logger.info(f"工具适配器：[{tool_call_id}] 原始本地路径 '{path}'。")
+            if hasattr(plugin_instance, 'plugin_base_data_path') and plugin_instance.plugin_base_data_path:
+                stored_path = await store_media_in_plugin_data(path, plugin_instance.plugin_base_data_path)
+                if stored_path:
+                    plugin_logger.info(f"工具适配器：[{tool_call_id}] 图片已存至插件数据目录 '{stored_path}'，将使用此路径发送。")
+                    media_segment = Comp.Image.fromFileSystem(str(stored_path))
+                else:
+                    plugin_logger.warning(f"工具适配器：[{tool_call_id}] 存储图片到插件数据目录失败，尝试使用原始路径 '{path}'。")
+                    media_segment = Comp.Image.fromFileSystem(path) # 回退到原始路径
+            else:
+                plugin_logger.warning(f"工具适配器：[{tool_call_id}] 插件实例缺少 plugin_base_data_path，直接使用原始路径 '{path}'。")
+                media_segment = Comp.Image.fromFileSystem(path)
         elif url:
-            plugin_logger.info(f"工具适配器：[{tool_call_id}] 本地路径无效，尝试使用 URL '{url}' 发送图片。")
+            plugin_logger.info(f"工具适配器：[{tool_call_id}] 本地路径无效或未提供，尝试使用 URL '{url}' 发送图片。")
             media_segment = Comp.Image.fromURL(url)
         
         if media_segment:
@@ -85,8 +97,18 @@ async def _handle_openapi_speech(event: AstrMessageEvent, tool_content_str: str,
         media_segment = None
 
         if path and os.path.exists(path):
-            plugin_logger.info(f"工具适配器：[{tool_call_id}] 使用本地路径 '{path}' 发送语音。")
-            media_segment = Comp.Record(file=path)
+            plugin_logger.info(f"工具适配器：[{tool_call_id}] 原始本地路径 '{path}'。")
+            if hasattr(plugin_instance, 'plugin_base_data_path') and plugin_instance.plugin_base_data_path:
+                stored_path = await store_media_in_plugin_data(path, plugin_instance.plugin_base_data_path)
+                if stored_path:
+                    plugin_logger.info(f"工具适配器：[{tool_call_id}] 语音已存至插件数据目录 '{stored_path}'，将使用此路径发送。")
+                    media_segment = Comp.Record(file=str(stored_path))
+                else:
+                    plugin_logger.warning(f"工具适配器：[{tool_call_id}] 存储语音到插件数据目录失败，尝试使用原始路径 '{path}'。")
+                    media_segment = Comp.Record(file=path) # 回退到原始路径
+            else:
+                plugin_logger.warning(f"工具适配器：[{tool_call_id}] 插件实例缺少 plugin_base_data_path，直接使用原始路径 '{path}'。")
+                media_segment = Comp.Record(file=path)
         
         if media_segment:
             await event.send(event.chain_result([media_segment]))
@@ -139,7 +161,13 @@ async def process_tool_response_from_history(plugin_instance: Star, event: AstrM
             return
 
         # 从后向前遍历，找到最新的未处理的目标工具响应
-        for message_entry in reversed(history_list):
+        # for message_entry in reversed(history_list): # 原遍历方式
+        for i in range(len(history_list)):
+            original_index = len(history_list) - 1 - i
+            message_entry = history_list[original_index] # 从后向前取元素
+            
+            plugin_logger.debug(f"工具适配器：检查历史记录条目索引 {original_index}: {message_entry}")
+
             if isinstance(message_entry, dict) and \
                message_entry.get("role") == "tool" and \
                "tool_call_id" in message_entry and \

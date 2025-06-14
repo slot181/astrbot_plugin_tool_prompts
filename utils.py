@@ -6,9 +6,10 @@ import shutil
 import aiohttp
 import asyncio
 from pathlib import Path
-from astrbot.api import logger # 使用 AstrBot 的 logger
-import astrbot.api.message_components as Comp # 新增导入
-import re # 确保 re 已导入，因为 download_media 中使用了
+from astrbot.api import logger
+import astrbot.api.message_components as Comp
+import re
+import uuid
 
 # 尝试从 AstrBot 内部获取 logger，如果失败则使用标准 logging
 try:
@@ -294,6 +295,67 @@ def _create_media_segment(path_or_url: str):
     
     plugin_logger.debug(f"媒体处理工具：路径 '{path_or_url}' 未匹配任何已知媒体类型，将作为纯文本处理。")
     return Comp.Plain(text=path_or_url)
+
+async def store_media_in_plugin_data(source_path_str: str, plugin_base_data_path: Path) -> Path | None:
+    """
+    将指定的媒体文件复制到插件的数据存储区，并按类型分类。
+
+    Args:
+        source_path_str (str): 源媒体文件的路径字符串。
+        plugin_base_data_path (Path): 插件的基础数据目录路径 (例如 ./data/plugins_data/plugin_name/).
+
+    Returns:
+        Path | None: 复制后新文件的 Path 对象，如果失败则返回 None。
+    """
+    if not plugin_base_data_path:
+        plugin_logger.error("存储媒体文件失败：插件基础数据路径无效。")
+        return None
+
+    try:
+        source_file = Path(source_path_str)
+        if not source_file.exists() or not source_file.is_file():
+            plugin_logger.error(f"存储媒体文件失败：源文件不存在或不是文件 -> {source_path_str}")
+            return None
+
+        mime_type = get_mime_type(source_file)
+        file_ext = source_file.suffix.lower()
+
+        sub_dir_name = "others" # 默认子目录
+        if mime_type:
+            if mime_type.startswith("image/"):
+                sub_dir_name = "images"
+            elif mime_type.startswith("video/"):
+                sub_dir_name = "videos"
+            elif mime_type.startswith("audio/"):
+                sub_dir_name = "audios"
+        elif file_ext: # 如果MIME类型未知，尝试根据扩展名判断
+            if file_ext in ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']:
+                sub_dir_name = "images"
+            elif file_ext in ['.mp4', '.mov', '.avi', '.mkv', '.webm']:
+                sub_dir_name = "videos"
+            elif file_ext in ['.mp3', '.wav', '.ogg', '.aac', '.flac', '.m4a']:
+                sub_dir_name = "audios"
+        
+        target_dir = plugin_base_data_path / sub_dir_name
+        if not target_dir.exists():
+            try:
+                target_dir.mkdir(parents=True, exist_ok=True)
+                plugin_logger.info(f"为媒体类型 '{sub_dir_name}' 创建了目录: {target_dir}")
+            except Exception as e_mkdir:
+                plugin_logger.error(f"创建目标子目录失败: {target_dir}, 错误: {e_mkdir}", exc_info=True)
+                return None
+        
+        # 生成唯一文件名以避免冲突
+        unique_filename = f"{uuid.uuid4().hex}{file_ext}"
+        destination_file = target_dir / unique_filename
+
+        shutil.copy2(source_file, destination_file) # copy2 会同时复制元数据
+        plugin_logger.info(f"媒体文件已成功从 '{source_file}' 复制到 '{destination_file}'")
+        return destination_file
+
+    except Exception as e:
+        plugin_logger.error(f"存储媒体文件时发生错误 (源: {source_path_str}): {e}", exc_info=True)
+        return None
 
 if __name__ == '__main__':
     pass

@@ -1,8 +1,8 @@
 import re
 import os
 from pathlib import Path
-import asyncio # 用于可能的异步操作
-import typing # 导入 typing 用于 Any 类型提示
+import asyncio
+import typing
 
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
@@ -25,7 +25,7 @@ from .utils import (
 from .tool_adapter import process_tool_response_from_history
 
 
-@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.3.10", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号更新
+@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "aiocqhttp 一个LLM工具调用和媒体链接处理插件", "0.4.0", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号更新
 class ToolCallNotifierPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -38,13 +38,11 @@ class ToolCallNotifierPlugin(Star):
         plugin_logger.setLevel(log_level_str)
         
         plugin_name_for_path = "astrbot_plugin_tool_prompts"
-        if hasattr(self, 'metadata') and self.metadata and hasattr(self.metadata, 'name') and self.metadata.name:
-            plugin_name_for_path = self.metadata.name
-        else:
-            plugin_logger.warning("无法从 self.metadata.name 获取插件名，将使用默认名 'astrbot_plugin_tool_prompts' 构建数据路径。")
 
         base_data_path = Path("./data/plugins_data") / plugin_name_for_path
         
+        self.plugin_base_data_path = base_data_path # 存储插件基础数据路径
+
         try:
             self.temp_media_dir = get_temp_media_dir(base_data_path)
             
