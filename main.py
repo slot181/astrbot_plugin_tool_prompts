@@ -21,8 +21,11 @@ from .utils import (
     call_gemini_api # 新增导入
 )
 
+# 从新创建的适配器文件中导入处理函数
+from .tool_adapter import handle_gemini_search_tool_response
 
-@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.3.2", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号更新
+
+@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.3.6", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号更新
 class ToolCallNotifierPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -329,6 +332,13 @@ class ToolCallNotifierPlugin(Star):
             plugin_logger.info("LLM响应处理器：将原始响应文本替换为空格以防止重复发送，并标记事件已处理。")
             setattr(event, '_media_processed_by_tool_prompts_plugin', True)
             resp.completion_text = " "
+
+    @filter.on_llm_response(priority=0) # 优先级设为0，确保在其他特定处理器后或独立运行
+    async def adapt_gemini_search_response(self, event: AstrMessageEvent, resp: LLMResponse):
+        """
+        钩子函数，用于调用 tool_adapter 中的逻辑来处理特定工具的响应。
+        """
+        await handle_gemini_search_tool_response(self, event, resp)
 
     def _is_media(self, path_or_url: str) -> bool:
         has_media_extension = any(path_or_url.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif', '.mp4', '.mov', '.avi', '.wav', '.pdf', '.doc', '.docx', '.txt'])
