@@ -348,6 +348,8 @@ class ToolCallNotifierPlugin(Star):
         在消息发送后触发，用于调用 tool_adapter 中的逻辑，
         该逻辑会检查会话历史以处理特定的工具响应。
         """
+        plugin_logger.critical("!!!!!! MAIN: after_message_sent HOOK TRIGGERED !!!!!!") # 高优先级日志
+        # print("!!!!!! MAIN: after_message_sent HOOK TRIGGERED !!!!!!") # 或者直接 print
         await process_tool_response_from_history(self, event)
 
     def _is_media(self, path_or_url: str) -> bool:
