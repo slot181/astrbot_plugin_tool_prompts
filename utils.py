@@ -7,6 +7,8 @@ import aiohttp
 import asyncio
 from pathlib import Path
 from astrbot.api import logger # 使用 AstrBot 的 logger
+import astrbot.api.message_components as Comp # 新增导入
+import re # 确保 re 已导入，因为 download_media 中使用了
 
 # 尝试从 AstrBot 内部获取 logger，如果失败则使用标准 logging
 try:
@@ -265,6 +267,33 @@ async def call_gemini_api(base_url: str, api_key: str, model_name: str, mime_typ
     except Exception as e:
         plugin_logger.error(f"调用 Gemini API 时发生未知错误: {e}", exc_info=True)
         return f"调用 Gemini API 时发生未知错误: {e}"
+
+def _create_media_segment(path_or_url: str):
+    """
+    根据路径或URL创建合适的 AstrBot 媒体消息段。
+    此函数现在位于 utils.py。
+    """
+    is_url = path_or_url.lower().startswith('http:') or path_or_url.lower().startswith('https:')
+    # 确保 plugin_logger 在此作用域内可用，如果它不是全局定义的（它是全局的）
+    
+    if any(path_or_url.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif']):
+        plugin_logger.debug(f"媒体处理工具：识别为图片: {path_or_url}")
+        return Comp.Image.fromURL(path_or_url) if is_url else Comp.Image.fromFileSystem(path_or_url)
+    if any(path_or_url.lower().endswith(ext) for ext in ['.mp4', '.mov', '.avi']):
+        plugin_logger.debug(f"媒体处理工具：识别为视频: {path_or_url}")
+        return Comp.Video.fromURL(path_or_url) if is_url else Comp.Video.fromFileSystem(path_or_url)
+    # 根据用户反馈，openapi_integrator_mcp-generate_speech 返回 .mp3
+    if any(path_or_url.lower().endswith(ext) for ext in ['.wav', '.mp3', '.silk', '.amr']): # 扩展音频格式支持
+        plugin_logger.debug(f"媒体处理工具：识别为音频: {path_or_url}")
+        # Comp.Record 通常需要本地文件路径，如果只有URL可能需要先下载
+        # 但 AstrBot 的 Comp.Record 也接受 url 参数
+        return Comp.Record(url=path_or_url) if is_url else Comp.Record(file=path_or_url)
+    if any(path_or_url.lower().endswith(ext) for ext in ['.pdf', '.doc', '.docx', '.txt']):
+        plugin_logger.debug(f"媒体处理工具：识别为文档: {path_or_url}")
+        return Comp.File(url=path_or_url, name=os.path.basename(path_or_url)) if is_url else Comp.File(file=path_or_url, name=os.path.basename(path_or_url))
+    
+    plugin_logger.debug(f"媒体处理工具：路径 '{path_or_url}' 未匹配任何已知媒体类型，将作为纯文本处理。")
+    return Comp.Plain(text=path_or_url)
 
 if __name__ == '__main__':
     pass
