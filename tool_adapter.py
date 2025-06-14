@@ -37,39 +37,42 @@ async def handle_gemini_search_tool_response(plugin_instance: Star, event: AstrM
     """
     # plugin_instance 参数是为了将来可能需要访问插件的 self.config 或 self.context
     
-    # 检查是否是工具响应，并且是来自 gemini_web_search 工具
-    if resp.role == "tool" and resp.tool_call_id and resp.tool_call_id.startswith("gemini_integrator_mcp-gemini_web_search"):
-        plugin_logger.info(f"ToolAdapter: 检测到来自 '{resp.tool_call_id}' 工具的响应。")
-        
-        if resp.content:
-            try:
-                tool_content_json = json.loads(resp.content)
-                answer_text = tool_content_json.get("answerText")
-                
-                if answer_text:
-                    plugin_logger.info(f"ToolAdapter: 从工具响应中提取到 answerText。准备发送。")
-                    # 使用 AstrBot 的方法发送消息
-                    # event.send() 是异步的，需要 await
-                    await event.send(event.plain_result(str(answer_text)))
-                    plugin_logger.info(f"ToolAdapter: 已将 answerText 作为单独消息发送。")
-                    
-                    # 根据需求，我们只是提取并发送 answerText，原始的工具响应（包含sources等）
-                    # 仍然会由 AstrBot 核心处理（例如，可能被加入到上下文中，或被LLM再次总结）。
-                    # 如果不希望原始的工具响应的 content 被LLM看到或进一步处理，
-                    # 可以在这里修改 resp.content，例如 resp.content = " "
-                    # 但题目要求是“提取出来用astrbot给的方法将值的内容发送到消息平台里”，
-                    # 并没有说要阻止原始响应进入后续流程。
-                    # 且“工具调用后的发送给用户的消息提示这个代码逻辑要保留”，
-                    # 这指的是LLM决定调用工具时的提示，与此处的工具执行结果处理不冲突。
+    tool_call_id_from_raw = None
+    if resp.role == "tool":
+        if resp.raw_completion and isinstance(resp.raw_completion, dict):
+            # 假设 raw_completion 是一个类似 OpenAI 消息对象的字典
+            # 它可能直接就是 'role':'tool' 的消息对象
+            if resp.raw_completion.get('role') == 'tool':
+                 tool_call_id_from_raw = resp.raw_completion.get('tool_call_id')
+            # 或者它可能嵌套在 choices -> message 中
+            elif 'choices' in resp.raw_completion and isinstance(resp.raw_completion['choices'], list) and resp.raw_completion['choices']:
+                message = resp.raw_completion['choices'][0].get('message')
+                if message and isinstance(message, dict) and message.get('role') == 'tool':
+                    tool_call_id_from_raw = message.get('tool_call_id')
 
-                else:
-                    plugin_logger.warning(f"ToolAdapter: 工具 '{resp.tool_call_id}' 的响应内容中未找到 'answerText'。内容: {resp.content}")
-            except json.JSONDecodeError:
-                plugin_logger.error(f"ToolAdapter: 解析工具 '{resp.tool_call_id}' 的响应内容失败 (非JSON格式)。内容: {resp.content}")
-            except Exception as e:
-                plugin_logger.error(f"ToolAdapter: 处理工具 '{resp.tool_call_id}' 响应时发生未知错误: {e}", exc_info=True)
-        else:
-            plugin_logger.warning(f"ToolAdapter: 工具 '{resp.tool_call_id}' 的响应内容为空。")
+        if tool_call_id_from_raw and tool_call_id_from_raw.startswith("gemini_integrator_mcp-gemini_web_search"):
+            plugin_logger.info(f"ToolAdapter: 检测到来自 '{tool_call_id_from_raw}' 工具的响应 (通过 raw_completion)。")
+            
+            if resp.content:
+                try:
+                    # resp.content 应该是工具返回的 JSON 字符串
+                    tool_content_json = json.loads(resp.content)
+                    answer_text = tool_content_json.get("answerText")
+                    
+                    if answer_text:
+                        plugin_logger.info(f"ToolAdapter: 从工具响应中提取到 answerText。准备发送。")
+                        await event.send(event.plain_result(str(answer_text)))
+                        plugin_logger.info(f"ToolAdapter: 已将 answerText 作为单独消息发送。")
+                    else:
+                        plugin_logger.warning(f"ToolAdapter: 工具 '{tool_call_id_from_raw}' 的响应内容中未找到 'answerText'。内容: {resp.content}")
+                except json.JSONDecodeError:
+                    plugin_logger.error(f"ToolAdapter: 解析工具 '{tool_call_id_from_raw}' 的响应内容失败 (非JSON格式)。内容: {resp.content}")
+                except Exception as e:
+                    plugin_logger.error(f"ToolAdapter: 处理工具 '{tool_call_id_from_raw}' 响应时发生未知错误: {e}", exc_info=True)
+            else:
+                plugin_logger.warning(f"ToolAdapter: 工具 '{tool_call_id_from_raw}' 的响应内容 (resp.content) 为空。")
+        elif resp.role == "tool": # 如果 role 是 tool 但无法从 raw_completion 中确定 tool_call_id 或不匹配
+            plugin_logger.debug(f"ToolAdapter: 收到 role='tool' 的响应，但无法从 raw_completion 确认 tool_call_id 或不匹配目标工具。raw_completion: {resp.raw_completion}")
 
 # 注意：这个文件本身不包含 @register 或 Star 类。
 # handle_gemini_search_tool_response 函数需要被 main.py 中的插件类的一个方法调用，
