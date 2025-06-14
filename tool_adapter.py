@@ -164,7 +164,7 @@ async def process_tool_response_from_history(plugin_instance: Star, event: AstrM
         # for message_entry in reversed(history_list): # 原遍历方式
         for i in range(len(history_list)):
             original_index = len(history_list) - 1 - i
-            message_entry = history_list[original_index] # 从后向前取元素
+            message_entry = history_list[original_index] # 从后向前取元素, 从新到旧
             
             plugin_logger.debug(f"工具适配器：检查历史记录条目索引 {original_index}: {message_entry}")
 
@@ -180,10 +180,9 @@ async def process_tool_response_from_history(plugin_instance: Star, event: AstrM
                     plugin_logger.debug(f"工具适配器：跳过不完整的工具消息条目: {message_entry}")
                     continue
 
-                # 如果最新的 role:tool 消息已经被处理，则停止，不再检查更早的
                 if tool_call_id in plugin_instance.processed_tool_call_ids:
-                    plugin_logger.debug(f"工具适配器：工具响应 '{tool_call_id}' 已处理，停止本次检查。")
-                    return 
+                    plugin_logger.debug(f"工具适配器：工具响应 '{tool_call_id}' 已处理，继续检查更早的响应。")
+                    continue # 修改：不再立即返回，而是继续查找更早的未处理响应
 
                 handler_function = None
                 if tool_call_id.startswith(GEMINI_WEB_SEARCH_PREFIX):
