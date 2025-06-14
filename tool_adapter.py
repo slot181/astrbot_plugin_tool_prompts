@@ -1,9 +1,8 @@
 import json
-from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.provider import LLMResponse
-from astrbot.api.star import Star # Star 通常在主插件类继承，这里可能不需要直接用
+from astrbot.api.event import AstrMessageEvent
+from astrbot.api.star import Star # Star 通常在主插件类继承
 
-# 尝试从 AstrBot 内部获取 logger，如果失败则使用标准 logging
+# 尝试从 AstrBot 内部获取 logger
 try:
     from astrbot.api import logger as plugin_logger
 except ImportError:
@@ -16,70 +15,94 @@ except ImportError:
         plugin_logger.addHandler(handler)
         plugin_logger.setLevel(logging.INFO)
 
-# 这个函数将作为钩子在插件的 Star 类中被注册
-# 为了让这个文件中的钩子能被主插件的 Star 实例注册，
-# 我们通常会将这个函数定义在 Star 类中，或者让 Star 类的一个方法调用这个。
-# 但根据插件开发文档，钩子可以直接定义在模块级别，然后由 Star 实例的方法通过装饰器注册。
-# 这里我们先定义函数，然后在 main.py 中想办法让插件实例注册它。
-# 一个更简洁的方式是，这个 tool_adapter.py 包含一个类，这个类有这个钩子方法。
-# 或者，更简单地，这个钩子函数直接在 main.py 的插件类中定义。
+TARGET_TOOL_CALL_ID_PREFIX = "gemini_integrator_mcp-gemini_web_search"
 
-# 考虑到重构的目标是将逻辑分离到新文件，我们在这里定义处理函数，
-# 然后在 main.py 的插件类中，创建一个方法用 @filter.on_llm_response 装饰，
-# 并在这个方法内部调用这个新文件中的处理逻辑。
-# 或者，如果 AstrBot 允许从外部文件直接注册钩子到某个 Star 实例，那会更直接。
-# 从文档看，@filter.on_llm_response() 需要装饰一个插件类的方法。
-
-async def handle_gemini_search_tool_response(plugin_instance: Star, event: AstrMessageEvent, resp: LLMResponse):
+async def process_tool_response_from_history(plugin_instance: Star, event: AstrMessageEvent):
     """
-    专门处理 gemini_integrator_mcp-gemini_web_search 工具调用后的响应。
-    如果检测到此工具的成功响应，则提取 answerText 并单独发送。
+    在消息发送后，检查会话历史记录中是否有来自特定工具的、尚未处理的响应。
+    如果找到，则提取 answerText 并单独发送。
     """
-    # plugin_instance 参数是为了将来可能需要访问插件的 self.config 或 self.context
-    
-    tool_call_id_from_raw = None
-    if resp.role == "tool":
-        if resp.raw_completion and isinstance(resp.raw_completion, dict):
-            # 假设 raw_completion 是一个类似 OpenAI 消息对象的字典
-            # 它可能直接就是 'role':'tool' 的消息对象
-            if resp.raw_completion.get('role') == 'tool':
-                 tool_call_id_from_raw = resp.raw_completion.get('tool_call_id')
-            # 或者它可能嵌套在 choices -> message 中
-            elif 'choices' in resp.raw_completion and isinstance(resp.raw_completion['choices'], list) and resp.raw_completion['choices']:
-                message = resp.raw_completion['choices'][0].get('message')
-                if message and isinstance(message, dict) and message.get('role') == 'tool':
-                    tool_call_id_from_raw = message.get('tool_call_id')
+    try:
+        if not hasattr(plugin_instance, 'processed_tool_call_ids'):
+            plugin_logger.warning("ToolAdapter: 'processed_tool_call_ids' not found on plugin instance. Skipping.")
+            return
 
-        if tool_call_id_from_raw and tool_call_id_from_raw.startswith("gemini_integrator_mcp-gemini_web_search"):
-            plugin_logger.info(f"ToolAdapter: 检测到来自 '{tool_call_id_from_raw}' 工具的响应 (通过 raw_completion)。")
-            
-            if resp.content:
-                try:
-                    # resp.content 应该是工具返回的 JSON 字符串
-                    tool_content_json = json.loads(resp.content)
-                    answer_text = tool_content_json.get("answerText")
-                    
-                    if answer_text:
-                        plugin_logger.info(f"ToolAdapter: 从工具响应中提取到 answerText。准备发送。")
-                        await event.send(event.plain_result(str(answer_text)))
-                        plugin_logger.info(f"ToolAdapter: 已将 answerText 作为单独消息发送。")
+        # 获取当前会话的上下文历史
+        # self.context is plugin_instance.context
+        conversation_manager = plugin_instance.context.conversation_manager
+        
+        # event.unified_msg_origin 是会话的唯一标识
+        current_conversation_id = await conversation_manager.get_curr_conversation_id(event.unified_msg_origin)
+        if not current_conversation_id:
+            plugin_logger.debug("ToolAdapter: No current conversation ID found. Skipping.")
+            return
+
+        conversation = await conversation_manager.get_conversation(event.unified_msg_origin, current_conversation_id)
+        if not conversation or not conversation.history:
+            plugin_logger.debug("ToolAdapter: No conversation history found. Skipping.")
+            return
+
+        history_list = []
+        try:
+            history_list = json.loads(conversation.history)
+            if not isinstance(history_list, list):
+                plugin_logger.warning(f"ToolAdapter: Conversation history is not a list. History: {conversation.history}")
+                return
+        except json.JSONDecodeError:
+            plugin_logger.error(f"ToolAdapter: Failed to parse conversation history JSON. History: {conversation.history}")
+            return
+        
+        # 从后向前遍历历史记录，查找最新的未处理的目标工具响应
+        for message_entry in reversed(history_list):
+            if isinstance(message_entry, dict) and \
+               message_entry.get("role") == "tool" and \
+               "tool_call_id" in message_entry and \
+               "content" in message_entry:
+                
+                tool_call_id = message_entry.get("tool_call_id")
+                
+                if tool_call_id and tool_call_id.startswith(TARGET_TOOL_CALL_ID_PREFIX):
+                    if tool_call_id not in plugin_instance.processed_tool_call_ids:
+                        plugin_logger.info(f"ToolAdapter: Found new tool response for '{tool_call_id}' in history.")
+                        
+                        tool_content_str = message_entry.get("content")
+                        if tool_content_str and isinstance(tool_content_str, str):
+                            try:
+                                tool_content_json = json.loads(tool_content_str)
+                                answer_text = tool_content_json.get("answerText")
+                                
+                                if answer_text:
+                                    plugin_logger.info(f"ToolAdapter: Extracting and sending answerText for '{tool_call_id}'.")
+                                    await event.send(event.plain_result(str(answer_text)))
+                                    plugin_instance.processed_tool_call_ids.add(tool_call_id)
+                                    plugin_logger.info(f"ToolAdapter: answerText sent and '{tool_call_id}' marked as processed.")
+                                    # 找到了最新的未处理的，处理完就返回，避免处理更早的同名工具调用（如果逻辑是只处理最新的一个）
+                                    # 或者，如果希望一次性处理所有新的，则不在这里 return，但要注意可能的多条消息发送。
+                                    # 当前逻辑：找到最新的一个未处理的，处理并返回。
+                                    return
+                                else:
+                                    plugin_logger.warning(f"ToolAdapter: 'answerText' not found in content for '{tool_call_id}'. Content: {tool_content_str}")
+                            except json.JSONDecodeError:
+                                plugin_logger.error(f"ToolAdapter: Failed to parse tool content JSON for '{tool_call_id}'. Content: {tool_content_str}")
+                            except Exception as e:
+                                plugin_logger.error(f"ToolAdapter: Error processing tool content for '{tool_call_id}': {e}", exc_info=True)
+                        else:
+                            plugin_logger.warning(f"ToolAdapter: Tool content is missing or not a string for '{tool_call_id}'.")
+                        
+                        # 即使处理失败或内容不符合预期，也标记为已处理，避免反复尝试
+                        plugin_instance.processed_tool_call_ids.add(tool_call_id)
+                        return # 处理完一个（无论成功与否）就退出，等待下一次钩子触发
                     else:
-                        plugin_logger.warning(f"ToolAdapter: 工具 '{tool_call_id_from_raw}' 的响应内容中未找到 'answerText'。内容: {resp.content}")
-                except json.JSONDecodeError:
-                    plugin_logger.error(f"ToolAdapter: 解析工具 '{tool_call_id_from_raw}' 的响应内容失败 (非JSON格式)。内容: {resp.content}")
-                except Exception as e:
-                    plugin_logger.error(f"ToolAdapter: 处理工具 '{tool_call_id_from_raw}' 响应时发生未知错误: {e}", exc_info=True)
-            else:
-                plugin_logger.warning(f"ToolAdapter: 工具 '{tool_call_id_from_raw}' 的响应内容 (resp.content) 为空。")
-        elif resp.role == "tool": # 如果 role 是 tool 但无法从 raw_completion 中确定 tool_call_id 或不匹配
-            plugin_logger.debug(f"ToolAdapter: 收到 role='tool' 的响应，但无法从 raw_completion 确认 tool_call_id 或不匹配目标工具。raw_completion: {resp.raw_completion}")
+                        # plugin_logger.debug(f"ToolAdapter: Tool response for '{tool_call_id}' already processed. Skipping.")
+                        # 如果已经处理过，并且我们是从后向前找最新的，那么更早的同名工具调用也应该被处理过了（或不应再处理）
+                        # 如果只关心最新的一个，可以在这里 break 或者 return
+                        return # 假设我们只关心最新的一个未处理的，如果最新的已经被处理，则停止
+            
+            # 如果当前消息不是我们要找的 role:tool，或者不是目标工具，继续往前找
+            # 但如果这条消息是 assistant 发出的包含 tool_calls 的消息，说明工具调用刚发生，结果还没回来
+            # if isinstance(message_entry, dict) and message_entry.get("role") == "assistant" and message_entry.get("tool_calls"):
+            #     plugin_logger.debug(f"ToolAdapter: Found assistant message with tool_calls, tool results might be next. History length: {len(history_list)}")
+            #     # 通常工具结果会紧跟在 assistant 的 tool_calls 消息之后
 
-# 注意：这个文件本身不包含 @register 或 Star 类。
-# handle_gemini_search_tool_response 函数需要被 main.py 中的插件类的一个方法调用，
-# 或者 main.py 中的插件类直接包含这个逻辑但通过 @filter.on_llm_response 注册。
-# 为了模块化，我们选择前者或在 main.py 中导入并注册。
-
-# 最简单的集成方式是在 main.py 的 ToolCallNotifierPlugin 类中添加一个新的方法，
-# 并用 @filter.on_llm_response 装饰它，然后在这个新方法中调用
-# from .tool_adapter import handle_gemini_search_tool_response
-# await handle_gemini_search_tool_response(self, event, resp)
+    except Exception as e:
+        plugin_logger.error(f"ToolAdapter: Error in process_tool_response_from_history: {e}", exc_info=True)

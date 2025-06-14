@@ -22,16 +22,17 @@ from .utils import (
 )
 
 # 从新创建的适配器文件中导入处理函数
-from .tool_adapter import handle_gemini_search_tool_response
+from .tool_adapter import process_tool_response_from_history # Updated import
 
 
-@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.3.7", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号更新
+@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "一个LLM工具调用和媒体链接处理插件", "0.3.8", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号更新
 class ToolCallNotifierPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
         self.temp_media_dir = None
         self._cleanup_task = None # 用于存储定时清理任务的引用
+        self.processed_tool_call_ids = set() # 新增：用于跟踪已处理的工具调用ID
 
         log_level_str = self.config.get("log_level", "INFO").upper()
         plugin_logger.setLevel(log_level_str)
@@ -333,12 +334,21 @@ class ToolCallNotifierPlugin(Star):
             setattr(event, '_media_processed_by_tool_prompts_plugin', True)
             resp.completion_text = " "
 
-    @filter.on_llm_response(priority=0) # 优先级设为0，确保在其他特定处理器后或独立运行
-    async def adapt_gemini_search_response(self, event: AstrMessageEvent, resp: LLMResponse):
+    # 移除旧的 on_llm_response 钩子 adapt_gemini_search_response
+    # @filter.on_llm_response(priority=0)
+    # async def adapt_gemini_search_response(self, event: AstrMessageEvent, resp: LLMResponse):
+    #     """
+    #     钩子函数，用于调用 tool_adapter 中的逻辑来处理特定工具的响应。
+    #     """
+    #     await handle_gemini_search_tool_response(self, event, resp) # 旧的调用
+
+    @filter.after_message_sent(priority=0) # 新增 after_message_sent 钩子
+    async def handle_message_sent_for_tool_response(self, event: AstrMessageEvent):
         """
-        钩子函数，用于调用 tool_adapter 中的逻辑来处理特定工具的响应。
+        在消息发送后触发，用于调用 tool_adapter 中的逻辑，
+        该逻辑会检查会话历史以处理特定的工具响应。
         """
-        await handle_gemini_search_tool_response(self, event, resp)
+        await process_tool_response_from_history(self, event)
 
     def _is_media(self, path_or_url: str) -> bool:
         has_media_extension = any(path_or_url.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif', '.mp4', '.mov', '.avi', '.wav', '.pdf', '.doc', '.docx', '.txt'])
