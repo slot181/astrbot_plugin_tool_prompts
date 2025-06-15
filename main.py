@@ -107,10 +107,15 @@ class ToolCallNotifierPlugin(Star):
 
     @filter.llm_tool(name="understand_media_from_reply")
     async def understand_media_from_reply(self, event: AstrMessageEvent, prompt: str) -> typing.AsyncGenerator[Comp.BaseMessageComponent, None]:
-        '''调用 gemini api 多模态理解引用消息中的媒体文件（视频或语音）。
+        '''调用 Gemini API 对引用的消息中的视频或语音文件进行多模态理解。
+
+        使用场景:
+        - 当用户需要理解被引用的消息中所包含的视频或语音内容时。
+        - 当用户希望基于这些媒体内容进行提问、总结、分析或获取特定信息时。
+        - 例如，用户可以引用一条包含视频的消息，并提问“这个视频讲了什么？”或“总结一下这个语音的主要内容”。
         
         Args:
-            prompt(string): 用户提供的关于如何理解或回应媒体内容的提示。
+            prompt(string): 用户提供的关于如何理解或回应媒体内容的提示。”
         '''
         plugin_logger.info(f"LLM工具 'understand_media_from_reply' 被调用，提示: {prompt}")
 
