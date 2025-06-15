@@ -201,8 +201,14 @@ async def process_tool_response_from_history(plugin_instance: Star, event: AstrM
         if last_known_length != -1 and current_history_length < last_known_length:
             plugin_logger.info(f"工具适配器：检测到会话 {session_id} 可能已重置 (当前长度 {current_history_length} < 上次记录长度 {last_known_length})。正在清除该会话的已处理索引记录。")
             processed_indices_for_session.clear()
+            if hasattr(plugin_instance, '_save_processed_state'):
+                plugin_instance._save_processed_state() # 保存状态
         
-        plugin_instance.session_last_history_length[session_id] = current_history_length
+        # 只有当长度实际变化时才更新和保存，或者如果它是第一次被记录
+        if plugin_instance.session_last_history_length.get(session_id) != current_history_length:
+            plugin_instance.session_last_history_length[session_id] = current_history_length
+            if hasattr(plugin_instance, '_save_processed_state'):
+                plugin_instance._save_processed_state() # 保存状态
         
         if not history_list:
             plugin_logger.debug(f"工具适配器：会话 {session_id} 历史记录为空（重置后或初始）。")
@@ -259,6 +265,8 @@ async def process_tool_response_from_history(plugin_instance: Star, event: AstrM
                     if processed_successfully is True or processed_successfully is False:
                          processed_indices_for_session.add(original_index)
                          plugin_logger.info(f"工具适配器：会话 {session_id}，索引 {original_index} (工具名: {tool_name_from_history}) 已标记为已处理 (处理结果: {processed_successfully})。")
+                         if hasattr(plugin_instance, '_save_processed_state'):
+                            plugin_instance._save_processed_state() # 保存状态
                     
                     # 处理完一个就立即返回，等待下一次 after_message_sent 触发
                     # 这保持了每次只发送一个工具结果的行为

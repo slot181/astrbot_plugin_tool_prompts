@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import asyncio
 import typing
+import json # 新增导入 for JSON持久化
 
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
@@ -25,7 +26,7 @@ from .utils import (
 from .tool_adapter import process_tool_response_from_history
 
 
-@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "aiocqhttp 一个LLM工具调用和媒体链接处理插件", "0.4.1", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号更新
+@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "aiocqhttp 一个LLM工具调用和媒体链接处理插件", "0.4.2", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号更新
 class ToolCallNotifierPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -44,8 +45,15 @@ class ToolCallNotifierPlugin(Star):
         base_data_path = Path("./data/plugins_data") / plugin_name_for_path
         
         self.plugin_base_data_path = base_data_path # 存储插件基础数据路径
+        self.state_file_path = self.plugin_base_data_path / "processed_state.json"
+        self._load_processed_state() # 加载持久化的状态
 
         try:
+            # 确保插件数据目录存在，以便保存状态文件
+            if not self.plugin_base_data_path.exists():
+                self.plugin_base_data_path.mkdir(parents=True, exist_ok=True)
+                plugin_logger.info(f"插件数据主目录已创建: {self.plugin_base_data_path}")
+
             self.temp_media_dir = get_temp_media_dir(base_data_path)
             
             if self.temp_media_dir:
@@ -99,7 +107,7 @@ class ToolCallNotifierPlugin(Star):
 
     @filter.llm_tool(name="understand_media_from_reply")
     async def understand_media_from_reply(self, event: AstrMessageEvent, prompt: str) -> typing.AsyncGenerator[Comp.BaseMessageComponent, None]:
-        '''理解引用消息中的媒体文件（视频或语音）并根据用户提示进行回应。
+        '''调用 gemini api 多模态理解引用消息中的媒体文件（视频或语音）。
         
         Args:
             prompt(string): 用户提供的关于如何理解或回应媒体内容的提示。
@@ -242,7 +250,7 @@ class ToolCallNotifierPlugin(Star):
 
     @filter.on_llm_response(priority=1)
     async def on_llm_response_handler(self, event: AstrMessageEvent, resp: LLMResponse):
-        """LLM响应后处理：仅发送工具调用通知。"""
+        """LLM响应后：如为工具调用，发送“正在调用”通知。"""
         
         if resp.role == "tool" and resp.tools_call_name:
             plugin_logger.info("LLM响应处理器：检测到工具调用。")
@@ -253,11 +261,8 @@ class ToolCallNotifierPlugin(Star):
 
     @filter.after_message_sent(priority=0)
     async def handle_message_sent_for_tool_response(self, event: AstrMessageEvent):
-        """
-        在消息发送后触发，用于调用 tool_adapter 中的逻辑，
-        该逻辑会检查会话历史以处理特定的工具响应。
-        """
-        # plugin_logger.critical("!!!!!! MAIN: after_message_sent HOOK TRIGGERED !!!!!!") # 保留此日志用于调试
+        """消息发送后：检查并处理历史记录中的工具响应。"""
+
         await process_tool_response_from_history(self, event)
 
     async def _prepare_multimodal_parts(self, replied_message_segments: list) -> list:
@@ -305,6 +310,7 @@ class ToolCallNotifierPlugin(Star):
 
     @filter.on_llm_request(priority=1)
     async def on_llm_request_handler(self, event: AstrMessageEvent, req: ProviderRequest):
+        """LLM请求前：处理QQ引用消息，整合到请求上下文。"""
         if event.get_platform_name() != "aiocqhttp":
             return
 
@@ -409,11 +415,12 @@ class ToolCallNotifierPlugin(Star):
     @filter.command_group("toolprompts_settings", alias={"tps"})
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def toolprompts_settings_group(self, event: AstrMessageEvent):
-        """管理插件的多模态处理设置 (简写: /tps)。"""
+        """管理插件的多模态处理设置 (/tps)。"""
         pass
 
     @toolprompts_settings_group.command("set_multimodal", alias={"sm"})
     async def set_multimodal_status(self, event: AstrMessageEvent, status: str):
+        """设置引用消息的多模态处理状态 (/tps sm on/off)。"""
         normalized_status = status.lower().strip()
         reply_msg = ""
         new_status = None
@@ -440,6 +447,7 @@ class ToolCallNotifierPlugin(Star):
 
     @toolprompts_settings_group.command("get_multimodal_status", alias={"gms"})
     async def get_multimodal_status(self, event: AstrMessageEvent):
+        """获取当前引用消息的多模态处理状态 (/tps gms)。"""
         multimodal_enabled = self.config.get("enable_multimodal_processing", False)
         status_str = "已启用" if multimodal_enabled else "已禁用"
         await event.send(event.plain_result(f"当前引用消息的多模态处理状态为: {status_str}"))
@@ -463,4 +471,63 @@ class ToolCallNotifierPlugin(Star):
                 cleanup_temp_files(self.temp_media_dir, cleanup_minutes) 
             else:
                  plugin_logger.info("插件终止：最终临时文件清理已禁用。")
+        
+        self._save_processed_state() # 在终止前保存状态
         plugin_logger.info(f"插件 '{self.metadata.name if hasattr(self, 'metadata') else 'ToolCallNotifierPlugin'}' 已终止。")
+
+    def _load_processed_state(self):
+        """从JSON文件加载已处理的会话状态。"""
+        if self.state_file_path.exists() and self.state_file_path.is_file():
+            try:
+                with open(self.state_file_path, 'r', encoding='utf-8') as f:
+                    state_data = json.load(f)
+                
+                # 将加载的列表转换回集合
+                self.session_processed_indices = {
+                    session_id: set(indices) 
+                    for session_id, indices in state_data.get("session_processed_indices", {}).items()
+                }
+                self.session_last_history_length = state_data.get("session_last_history_length", {})
+                plugin_logger.info(f"已成功从 {self.state_file_path} 加载已处理的会话状态。")
+            except json.JSONDecodeError:
+                plugin_logger.error(f"解析状态文件 {self.state_file_path} 失败。将使用空状态初始化。", exc_info=True)
+                self.session_processed_indices = {}
+                self.session_last_history_length = {}
+            except Exception as e:
+                plugin_logger.error(f"加载状态文件 {self.state_file_path} 时发生未知错误。将使用空状态初始化。", exc_info=True)
+                self.session_processed_indices = {}
+                self.session_last_history_length = {}
+        else:
+            plugin_logger.info(f"状态文件 {self.state_file_path} 未找到。将使用空状态初始化。")
+            self.session_processed_indices = {}
+            self.session_last_history_length = {}
+
+    def _save_processed_state(self):
+        """将已处理的会话状态保存到JSON文件。"""
+        if not self.plugin_base_data_path:
+            plugin_logger.error("无法保存状态：插件基础数据路径未设置。")
+            return
+
+        if not self.plugin_base_data_path.exists():
+            try:
+                self.plugin_base_data_path.mkdir(parents=True, exist_ok=True)
+                plugin_logger.info(f"为保存状态文件，创建了插件数据主目录: {self.plugin_base_data_path}")
+            except Exception as e_mkdir:
+                plugin_logger.error(f"创建插件数据目录 {self.plugin_base_data_path} 失败，无法保存状态: {e_mkdir}", exc_info=True)
+                return
+        
+        try:
+            # 将集合转换为列表以便JSON序列化
+            serializable_indices = {
+                session_id: list(indices) 
+                for session_id, indices in self.session_processed_indices.items()
+            }
+            state_data = {
+                "session_processed_indices": serializable_indices,
+                "session_last_history_length": self.session_last_history_length
+            }
+            with open(self.state_file_path, 'w', encoding='utf-8') as f:
+                json.dump(state_data, f, ensure_ascii=False, indent=4)
+            plugin_logger.info(f"已处理的会话状态已成功保存到 {self.state_file_path}")
+        except Exception as e:
+            plugin_logger.error(f"保存状态到文件 {self.state_file_path} 失败。", exc_info=True)
