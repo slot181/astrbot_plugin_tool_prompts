@@ -25,14 +25,16 @@ from .utils import (
 from .tool_adapter import process_tool_response_from_history
 
 
-@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "aiocqhttp 一个LLM工具调用和媒体链接处理插件", "0.4.0", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号更新
+@register("astrbot_plugin_tool_prompts", "PluginDeveloper", "aiocqhttp 一个LLM工具调用和媒体链接处理插件", "0.4.1", "https://github.com/slot181/astrbot_plugin_tool_prompts") # 版本号更新
 class ToolCallNotifierPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
         self.temp_media_dir = None
         self._cleanup_task = None 
-        self.processed_tool_call_ids = set() 
+        # self.processed_tool_call_ids = set() # 旧的全局处理记录，将被替换
+        self.session_processed_indices = {}  # key: session_id, value: set of processed original_indices
+        self.session_last_history_length = {} # key: session_id, value: last known history length for reset detection
 
         log_level_str = self.config.get("log_level", "INFO").upper()
         plugin_logger.setLevel(log_level_str)
